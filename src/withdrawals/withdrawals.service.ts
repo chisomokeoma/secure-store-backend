@@ -4,7 +4,7 @@ import { ReceiptStatus } from '@prisma/client';
 
 @Injectable()
 export class WithdrawalsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   async getEligibleReceipts(clientId?: string) {
     const user = clientId ? { id: clientId } : await this.prisma.user.findFirst({ where: { email: 'demo@securestore.com' } });
@@ -24,13 +24,13 @@ export class WithdrawalsService {
   async getReceiptPrefill(receiptId: string) {
     const r = await this.prisma.receipt.findUnique({ where: { id: receiptId }, include: { warehouse: true, commodity: true } });
     if (!r) throw new NotFoundException('Receipt not found');
-    
+
     const wc = await this.prisma.warehouseCommodity.findUnique({
       where: { warehouseId_commodityId: { warehouseId: r.warehouseId, commodityId: r.commodityId } }
     });
 
-    return { 
-      maxQuantity: r.quantityAvailable, 
+    return {
+      maxQuantity: r.quantityAvailable,
       storageFeePerUnit: wc?.storageFeePerUnit || 15,
       receiptDetails: {
         receiptNumber: r.receiptNumber,
@@ -46,28 +46,28 @@ export class WithdrawalsService {
   async calculateWithdrawal(dto: any) {
     const prefill = await this.getReceiptPrefill(dto.receiptId);
     if (dto.quantity > (prefill.maxQuantity || 0)) throw new BadRequestException('Requested quantity exceeds available quantity');
-    
+
     const storageFee = dto.quantity * prefill.storageFeePerUnit;
     const handlingFee = 10000; // Mocked handling fee matching the design
     const totalFee = storageFee + handlingFee;
-    
-    return { 
-      totalFee, 
-      breakdown: { 
-        quantity: dto.quantity, 
+
+    return {
+      totalFee,
+      breakdown: {
+        quantity: dto.quantity,
         feePerUnit: prefill.storageFeePerUnit,
         storageFee,
         handlingFee
-      } 
+      }
     };
   }
 
   async createWithdrawalRequest(dto: any) {
     const calc = await this.calculateWithdrawal(dto);
-    return { 
-      id: 'W-REQ-' + Math.floor(Math.random()*10000), 
-      status: 'PENDING_PAYMENT', 
-      quantity: dto.quantity, 
+    return {
+      id: 'W-REQ-' + Math.floor(Math.random() * 10000),
+      status: 'PENDING_PAYMENT',
+      quantity: dto.quantity,
       fee: calc.totalFee,
       reason: dto.reason,
       plannedDate: dto.plannedDate
