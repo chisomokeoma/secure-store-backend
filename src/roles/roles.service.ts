@@ -46,28 +46,34 @@
 // }
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { Role } from '../../prisma/generated/prisma/client';
 
 @Injectable()
 export class RolesService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
-  async assignRole(userId: string, role: Role) {
+  async assignRole(userId: string, roleId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
     });
-
     if (!user) {
-      throw new NotFoundException(`User not found`);
+      throw new NotFoundException('User not found');
+    }
+
+    const role = await this.prisma.role.findUnique({
+      where: { id: roleId },
+    });
+    if (!role) {
+      throw new NotFoundException('Role not found');
     }
 
     return this.prisma.user.update({
       where: { id: userId },
-      data: { role }, // 👈 role is an enum field directly on user
+      data: { roleId },
+      include: { role: true },
     });
   }
 
   getRoles() {
-    return Object.values(Role); // 👈 returns all available roles
+    return this.prisma.role.findMany();
   }
 }

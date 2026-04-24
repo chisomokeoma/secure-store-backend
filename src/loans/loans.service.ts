@@ -41,40 +41,45 @@
 //   }
 // }
 
-
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReceiptStatus } from '../../prisma/generated/prisma/client';
+import { ReceiptStatus } from '@prisma/client';
 import { CalculateLoanDto, CreateLoanDto } from './dto/loans.dto';
 
 @Injectable()
 export class LoansService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
   async getFinanciers() {
     return this.prisma.financier.findMany({
-      select: { id: true, name: true, interestRate: true, maxTenure: true }
+      select: { id: true, name: true, interestRate: true, maxTenure: true },
     });
   }
 
   async getPledgeableReceipts(commodity?: string) {
     const receipts = await this.prisma.receipt.findMany({
       where: { status: ReceiptStatus.ACTIVE }, // 👈 removed quantityAvailable
-      include: { commodity: true } // 👈 include to access commodity relation
+      include: { commodity: true }, // 👈 include to access commodity relation
     });
 
     return receipts
-      .filter(r => !commodity || r.commodity.name.toLowerCase() === commodity.toLowerCase())
-      .map(r => ({
+      .filter(
+        (r) =>
+          !commodity ||
+          r.commodity.name.toLowerCase() === commodity.toLowerCase(),
+      )
+      .map((r) => ({
         id: r.id,
         receiptNumber: r.receiptNumber,
         availableQuantity: r.quantity, // 👈 changed from quantityAvailable to quantity
-        commodity: r.commodity.name
+        commodity: r.commodity.name,
       }));
   }
 
   async calculateLoan(dto: CalculateLoanDto) {
-    const financier = await this.prisma.financier.findUnique({ where: { id: dto.financierId } });
+    const financier = await this.prisma.financier.findUnique({
+      where: { id: dto.financierId },
+    });
     if (!financier) throw new NotFoundException('Financier not found');
 
     const totalInterest = (dto.amount * financier.interestRate) / 100;
@@ -82,6 +87,10 @@ export class LoansService {
   }
 
   async createLoan(dto: CreateLoanDto) {
-    return { id: 'L-REQ-' + Math.floor(Math.random() * 10000), status: 'PENDING', amount: dto.amount };
+    return {
+      id: 'L-REQ-' + Math.floor(Math.random() * 10000),
+      status: 'PENDING',
+      amount: dto.amount,
+    };
   }
 }

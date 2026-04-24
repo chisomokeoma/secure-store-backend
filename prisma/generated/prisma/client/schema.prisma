@@ -10,19 +10,15 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // ==========================================
 // ENUMS
 // ==========================================
 
-enum Role {
-  CLIENT
-  WAREHOUSE_MANAGER
-  TENANT_ADMIN
-  FINANCIER
-  GLOBAL_ADMIN
-}
+
+
 
 enum MeasurementUnit {
   METRIC_TON
@@ -50,7 +46,8 @@ model User {
   password  String
   firstName String @map("first_name")
   lastName  String @map("last_name")
-  role      Role   @default(CLIENT)
+ roleId String?
+ role   Role?   @relation(fields: [roleId], references: [id])
 
   // Relations
   receipts Receipt[]

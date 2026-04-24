@@ -5,6 +5,9 @@ import {
   Warehouse,
   Commodity,
 } from '@prisma/client';
+
+// import { PrismaClient, MeasurementUnit, ReceiptStatus } from '@prisma/client';
+
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import 'dotenv/config';
@@ -403,7 +406,7 @@ main()
 // import { Pool } from 'pg';
 // import 'dotenv/config';
 // import * as bcrypt from 'bcrypt';
-// import { MeasurementUnit, PrismaClient, ReceiptStatus } from '../prisma/generated/prisma/client';
+// import { MeasurementUnit, PrismaClient, ReceiptStatus } from '@prisma/client';
 
 // const pool = new Pool({
 //   connectionString: process.env.DATABASE_URL as string,

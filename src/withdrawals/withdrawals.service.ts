@@ -79,38 +79,50 @@
 //   }
 // }
 
-
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReceiptStatus } from '../../prisma/generated/prisma/client';
-import { CalculateWithdrawalDto, CreateWithdrawalDto } from './dto/withdrawals.dto';
+import { ReceiptStatus } from '@prisma/client';
+import {
+  CalculateWithdrawalDto,
+  CreateWithdrawalDto,
+} from './dto/withdrawals.dto';
 
 @Injectable()
 export class WithdrawalsService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
   async getEligibleReceipts(clientId?: string) {
     const user = clientId
       ? { id: clientId }
-      : await this.prisma.user.findFirst({ where: { email: 'demo@securestore.com' } });
+      : await this.prisma.user.findFirst({
+          where: { email: 'demo@securestore.com' },
+        });
 
-    return this.prisma.receipt.findMany({
-      where: { clientId: user?.id, status: ReceiptStatus.ACTIVE },
-      include: { commodity: true, warehouse: true }
-    }).then(res => res.map(r => ({
-      id: r.id,
-      receiptNumber: r.receiptNumber,
-      commodity: r.commodity.name,
-      availableQuantity: r.quantity, // 👈 changed from quantityAvailable to quantity
-      warehouse: r.warehouse.name,
-      unit: r.commodity.unitOfMeasure
-    })));
+    return this.prisma.receipt
+      .findMany({
+        where: { clientId: user?.id, status: ReceiptStatus.ACTIVE },
+        include: { commodity: true, warehouse: true },
+      })
+      .then((res) =>
+        res.map((r) => ({
+          id: r.id,
+          receiptNumber: r.receiptNumber,
+          commodity: r.commodity.name,
+          availableQuantity: r.quantity, // 👈 changed from quantityAvailable to quantity
+          warehouse: r.warehouse.name,
+          unit: r.commodity.unitOfMeasure,
+        })),
+      );
   }
 
   async getReceiptPrefill(receiptId: string) {
     const r = await this.prisma.receipt.findUnique({
       where: { id: receiptId },
-      include: { warehouse: true, commodity: true }
+      include: { warehouse: true, commodity: true },
     });
     if (!r) throw new NotFoundException('Receipt not found');
 
@@ -123,15 +135,17 @@ export class WithdrawalsService {
         grade: r.grade || 'Standard',
         warehouseLocation: r.warehouse.location,
         dateOfDeposit: r.dateOfDeposit,
-        expiryDate: r.expiryDate
-      }
+        expiryDate: r.expiryDate,
+      },
     };
   }
 
   async calculateWithdrawal(dto: CalculateWithdrawalDto) {
     const prefill = await this.getReceiptPrefill(dto.receiptId);
     if (dto.quantity > (prefill.maxQuantity || 0))
-      throw new BadRequestException('Requested quantity exceeds available quantity');
+      throw new BadRequestException(
+        'Requested quantity exceeds available quantity',
+      );
 
     const storageFee = dto.quantity * prefill.storageFeePerUnit;
     const handlingFee = 10000;
@@ -143,8 +157,8 @@ export class WithdrawalsService {
         quantity: dto.quantity,
         feePerUnit: prefill.storageFeePerUnit,
         storageFee,
-        handlingFee
-      }
+        handlingFee,
+      },
     };
   }
 
@@ -156,7 +170,7 @@ export class WithdrawalsService {
       quantity: dto.quantity,
       fee: calc.totalFee,
       reason: dto.reason,
-      plannedDate: dto.plannedDate
+      plannedDate: dto.plannedDate,
     };
   }
 
