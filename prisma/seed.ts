@@ -1,13 +1,15 @@
 import { PrismaClient, MeasurementUnit, ReceiptStatus, Warehouse, Commodity } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 import 'dotenv/config';
 import * as bcrypt from 'bcrypt';
 
-const adapter = new PrismaPg({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL as string,
-} as any);
+});
 
-const prisma = new PrismaClient({ adapter } as any);
+const adapter = new PrismaPg(pool);
+const prisma = new PrismaClient({ adapter });
 
 async function main() {
   console.log('Starting seed...');

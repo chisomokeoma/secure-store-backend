@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReceiptStatus } from '@prisma/client';
+import { CalculateWithdrawalDto, CreateWithdrawalDto } from './dto/withdrawals.dto';
 
 @Injectable()
 export class WithdrawalsService {
@@ -43,7 +44,7 @@ export class WithdrawalsService {
     };
   }
 
-  async calculateWithdrawal(dto: any) {
+  async calculateWithdrawal(dto: CalculateWithdrawalDto) {
     const prefill = await this.getReceiptPrefill(dto.receiptId);
     if (dto.quantity > (prefill.maxQuantity || 0)) throw new BadRequestException('Requested quantity exceeds available quantity');
 
@@ -62,7 +63,7 @@ export class WithdrawalsService {
     };
   }
 
-  async createWithdrawalRequest(dto: any) {
+  async createWithdrawalRequest(dto: CreateWithdrawalDto) {
     const calc = await this.calculateWithdrawal(dto);
     return {
       id: 'W-REQ-' + Math.floor(Math.random() * 10000),

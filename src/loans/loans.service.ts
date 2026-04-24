@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CalculateLoanDto, CreateLoanDto } from './dto/loans.dto';
 
 @Injectable()
 export class LoansService {
@@ -27,7 +28,7 @@ export class LoansService {
         }));
   }
 
-  async calculateLoan(dto: any) {
+  async calculateLoan(dto: CalculateLoanDto) {
     const financier = await this.prisma.financier.findUnique({ where: { id: dto.financierId } });
     if (!financier) throw new NotFoundException('Financier not found');
 
@@ -35,7 +36,8 @@ export class LoansService {
     return { totalInterest, monthlyPayment: (dto.amount + totalInterest) / 12 };
   }
 
-  async createLoan(dto: any) {
+  async createLoan(dto: CreateLoanDto) {
     return { id: 'L-REQ-' + Math.floor(Math.random()*10000), status: 'PENDING', amount: dto.amount };
   }
 }
+
