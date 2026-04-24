@@ -1,0 +1,137 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum Role {
+  CLIENT
+  WAREHOUSE_MANAGER
+  TENANT_ADMIN
+  FINANCIER
+  GLOBAL_ADMIN
+}
+
+enum MeasurementUnit {
+  METRIC_TON
+  KILOGRAM
+  METER
+  BAG
+  UNIT
+}
+
+enum ReceiptStatus {
+  ACTIVE
+  CANCELLED
+  LIEN
+  PLEDGED
+  EXPIRED
+}
+
+// ==========================================
+// MODELS
+// ==========================================
+
+model User {
+  id        String @id @default(uuid())
+  email     String @unique
+  password  String
+  firstName String @map("first_name")
+  lastName  String @map("last_name")
+  role      Role   @default(CLIENT)
+
+  // Relations
+  receipts Receipt[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Warehouse {
+  id       String @id @default(uuid())
+  name     String
+  location String
+
+  // Relations
+  receipts Receipt[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("warehouses")
+}
+
+model Commodity {
+  id            String          @id @default(uuid())
+  name          String          @unique
+  description   String?
+  unitOfMeasure MeasurementUnit @map("unit_of_measure")
+
+  // Relations
+  receipts Receipt[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("commodities")
+}
+
+model Receipt {
+  id            String        @id @default(uuid())
+  receiptNumber String        @unique @map("receipt_number") // e.g., WR-2025-01
+  status        ReceiptStatus @default(ACTIVE)
+
+  // Commodity Information
+  commodityId String    @map("commodity_id")
+  commodity   Commodity @relation(fields: [commodityId], references: [id])
+  quantity    Float
+  grade       String?
+
+  // Storage Information
+  warehouseId String    @map("warehouse_id")
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  // Ownership
+  clientId String @map("client_id")
+  client   User   @relation(fields: [clientId], references: [id])
+
+  dateOfDeposit DateTime  @map("date_of_deposit")
+  expiryDate    DateTime? @map("expiry_date")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([clientId])
+  @@index([commodityId])
+  @@index([warehouseId])
+  @@index([status])
+  @@map("receipts")
+}
+
+model Financier {
+  id           String @id @default(uuid())
+  name         String @unique
+  interestRate Float  @map("interest_rate")
+  minTenure    Int    @map("min_tenure")
+  maxTenure    Int    @map("max_tenure")
+  approvalTime String @map("approval_time")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("financiers")
+}
