@@ -1,7 +1,20 @@
-import { Controller, Get, Post, Param, Body, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { WithdrawalsService } from './withdrawals.service';
-import { CalculateWithdrawalDto, CreateWithdrawalDto, WithdrawalCalculationResponseDto, WithdrawalResponseDto } from './dto/withdrawals.dto';
+import {
+  CalculateWithdrawalDto,
+  CreateWithdrawalDto,
+  WithdrawalCalculationResponseDto,
+  WithdrawalResponseDto,
+} from './dto/withdrawals.dto';
 
 @ApiTags('Withdrawals')
 @Controller('withdrawals')
@@ -40,11 +53,45 @@ export class WithdrawalsController {
 
   @Post(':id/confirm-payment')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Confirm payment for a withdrawal' })
+  @ApiOperation({
+    summary: 'Confirm payment — moves PENDING_PAYMENT → PAID_PENDING_APPROVAL',
+  })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: WithdrawalResponseDto })
   confirmPayment(@Param('id') id: string) {
     return this.withdrawalsService.confirmPayment(id);
+  }
+
+  @Post(':id/approve')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Approve withdrawal — moves PAID_PENDING_APPROVAL → APPROVED',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: WithdrawalResponseDto })
+  approveWithdrawal(@Param('id') id: string) {
+    return this.withdrawalsService.approveWithdrawal(id);
+  }
+
+  @Post(':id/reject')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Reject withdrawal' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: WithdrawalResponseDto })
+  rejectWithdrawal(@Param('id') id: string) {
+    return this.withdrawalsService.rejectWithdrawal(id);
+  }
+
+  @Post(':id/complete')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Complete withdrawal — cancels source receipt, issues child receipt for remainder',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, description: 'Completion details' })
+  completeWithdrawal(@Param('id') id: string) {
+    return this.withdrawalsService.completeWithdrawal(id);
   }
 
   @Get(':id')
@@ -52,14 +99,6 @@ export class WithdrawalsController {
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: WithdrawalResponseDto })
   getWithdrawalDetail(@Param('id') id: string) {
-    return { id, status: 'PENDING_PAYMENT', quantity: 100 };
-  }
-
-  @Get(':id/summary.pdf')
-  @ApiOperation({ summary: 'Download withdrawal summary PDF' })
-  @ApiParam({ name: 'id' })
-  @ApiResponse({ status: 200, description: 'PDF Stream' })
-  getSummaryPdf(@Param('id') id: string) {
-    return 'PDF Stub';
+    return this.withdrawalsService.getWithdrawalDetail(id);
   }
 }

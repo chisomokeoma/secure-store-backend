@@ -366,6 +366,9 @@ async function main() {
       const commId = getComm(r.comm);
 
       if (whId && commId) {
+        const isLocked = (
+          [ReceiptStatus.PLEDGED, ReceiptStatus.LIEN] as ReceiptStatus[]
+        ).includes(r.status);
         await prisma.receipt.upsert({
           where: { receiptNumber: r.num },
           update: {},
@@ -375,11 +378,7 @@ async function main() {
             warehouseId: whId,
             clientId: demoUser.id,
             quantity: r.qty,
-            quantityAvailable: (
-              [ReceiptStatus.PLEDGED, ReceiptStatus.LIEN] as ReceiptStatus[]
-            ).includes(r.status)
-              ? 0
-              : r.qty,
+            quantityAvailable: isLocked ? 0 : r.qty,
             grade: r.grade,
             status: r.status,
             dateOfDeposit: new Date('2025-01-01T00:00:00Z'),

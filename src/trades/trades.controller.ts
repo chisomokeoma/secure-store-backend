@@ -1,7 +1,20 @@
-import { Controller, Get, Post, Param, Body } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { TradesService } from './trades.service';
-import { CreateTradeDto, TradeListingDto, TradeResponseDto } from './dto/trades.dto';
+import {
+  CreateTradeDto,
+  SettleTradeDto,
+  TradeListingDto,
+  TradeResponseDto,
+} from './dto/trades.dto';
 
 @ApiTags('Trades')
 @Controller('trades')
@@ -16,10 +29,35 @@ export class TradesController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a new trade listing' })
+  @ApiOperation({
+    summary: 'Create a new trade listing — locks the receipt with LIEN status',
+  })
   @ApiResponse({ status: 201, type: TradeResponseDto })
   createTrade(@Body() body: CreateTradeDto) {
     return this.tradesService.createTrade(body);
+  }
+
+  @Post(':id/settle')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Settle a trade — transfers receipt ownership to buyer, status returns to ACTIVE',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: TradeResponseDto })
+  settleTrade(@Param('id') id: string, @Body() body: SettleTradeDto) {
+    return this.tradesService.settleTrade(id, body.buyerId);
+  }
+
+  @Post(':id/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cancel a trade listing — returns receipt to ACTIVE for seller',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: TradeResponseDto })
+  cancelTrade(@Param('id') id: string) {
+    return this.tradesService.cancelTrade(id);
   }
 
   @Get(':id')
@@ -27,6 +65,6 @@ export class TradesController {
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: TradeListingDto })
   getTradeDetail(@Param('id') id: string) {
-    return { id, commodityName: 'Maize', quantity: 100, price: 500 };
+    return this.tradesService.getTradeDetail(id);
   }
 }

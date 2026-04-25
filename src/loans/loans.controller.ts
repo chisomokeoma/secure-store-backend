@@ -1,7 +1,29 @@
-import { Controller, Get, Post, Param, Query, Body, HttpCode, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Query,
+  Body,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiParam,
+} from '@nestjs/swagger';
 import { LoansService } from './loans.service';
-import { FinancierDto, PledgeableReceiptDto, CalculateLoanDto, CreateLoanDto, LoanCalculationResponseDto, LoanResponseDto } from './dto/loans.dto';
+import {
+  FinancierDto,
+  PledgeableReceiptDto,
+  CalculateLoanDto,
+  CreateLoanDto,
+  LoanCalculationResponseDto,
+  LoanResponseDto,
+} from './dto/loans.dto';
 
 @ApiTags('Loans')
 @Controller('loans')
@@ -20,7 +42,7 @@ export class LoansController {
   @ApiQuery({ name: 'commodity', required: false })
   @ApiResponse({ status: 200, type: [PledgeableReceiptDto] })
   getPledgeableReceipts(@Query('commodity') commodity?: string) {
-    return this.loansService.getPledgeableReceipts(commodity);
+    return this.loansService.getPledgeableReceipts(undefined, commodity);
   }
 
   @Post('calculate')
@@ -32,10 +54,43 @@ export class LoansController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a new loan application' })
+  @ApiOperation({
+    summary: 'Create a new loan application — pledges the collateral receipt',
+  })
   @ApiResponse({ status: 201, type: LoanResponseDto })
   createLoan(@Body() body: CreateLoanDto) {
     return this.loansService.createLoan(body);
+  }
+
+  @Post(':id/approve')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Approve loan — moves PENDING → ACTIVE' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: LoanResponseDto })
+  approveLoan(@Param('id') id: string) {
+    return this.loansService.approveLoan(id);
+  }
+
+  @Post(':id/reject')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reject loan — returns pledged receipt to ACTIVE',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: LoanResponseDto })
+  rejectLoan(@Param('id') id: string) {
+    return this.loansService.rejectLoan(id);
+  }
+
+  @Post(':id/repay')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark loan as repaid — releases the pledged receipt',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, type: LoanResponseDto })
+  repayLoan(@Param('id') id: string) {
+    return this.loansService.repayLoan(id);
   }
 
   @Get(':id')
@@ -43,6 +98,6 @@ export class LoansController {
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: LoanResponseDto })
   getLoanDetail(@Param('id') id: string) {
-    return { id, status: 'PENDING', amount: 5000 };
+    return this.loansService.getLoanDetail(id);
   }
 }
