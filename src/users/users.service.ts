@@ -9,7 +9,7 @@ export class UsersService {
   async getMe(userId?: string) {
     const user = await this.prisma.user.findFirst({
       where: userId ? { id: userId } : { email: 'demo@securestore.com' },
-      include: { role: true },
+      include: { roles: true },
     });
     if (!user) throw new NotFoundException('User not found');
 
@@ -18,7 +18,7 @@ export class UsersService {
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
-      role: user.role?.name,
+      roles: user.roles.map((r) => ({ id: r.id, name: r.name })),
     };
   }
 
@@ -31,7 +31,7 @@ export class UsersService {
     const updated = await this.prisma.user.update({
       where: { id: user.id },
       data: dto,
-      include: { role: true },
+      include: { roles: true },
     });
 
     return {
@@ -39,7 +39,7 @@ export class UsersService {
       email: updated.email,
       firstName: updated.firstName,
       lastName: updated.lastName,
-      role: updated.role?.name,
+      roles: updated.roles.map((r) => ({ id: r.id, name: r.name })),
     };
   }
 }
