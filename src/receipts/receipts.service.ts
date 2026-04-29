@@ -12,18 +12,38 @@ export class ReceiptsService {
     limit?: string;
     search?: string;
   }) {
+    const page = parseInt(filters.page || '1', 10);
+    const limit = parseInt(filters.limit || '10', 10);
+    const skip = (page - 1) * limit;
+
     const where: any = {};
+
+    // 1. Status Filter
     if (filters?.status) {
       where.status = filters.status as ReceiptStatus;
     }
 
-    const receipts = await this.prisma.receipt.findMany({
-      where,
-      include: { commodity: true, warehouse: true },
-      orderBy: { createdAt: 'desc' },
-    });
+    // 2. Search Filter
+    if (filters.search) {
+      where.OR = [
+        { receiptNumber: { contains: filters.search, mode: 'insensitive' } },
+        { commodity: { name: { contains: filters.search, mode: 'insensitive' } } },
+      ];
+    }
 
-    return receipts.map((r) => ({
+    // 3. Fetch Data & Total Count
+    const [receipts, total] = await Promise.all([
+      this.prisma.receipt.findMany({
+        where,
+        include: { commodity: true, warehouse: true },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.receipt.count({ where }),
+    ]);
+
+    const data = receipts.map((r) => ({
       id: r.id,
       receiptNumber: r.receiptNumber,
       commodityName: r.commodity.name,
@@ -32,24 +52,32 @@ export class ReceiptsService {
       quantityAvailable: r.quantityAvailable,
       status: r.status,
     }));
+
+    return {
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 
   async getReceiptStats() {
-    const [totalIssued, totalActive, totalPledged, totalCompleted] =
+    const [totalIssued, totalActive, totalPledged, totalWithdrawn] =
       await Promise.all([
         this.prisma.receipt.count(),
         this.prisma.receipt.count({ where: { status: ReceiptStatus.ACTIVE } }),
         this.prisma.receipt.count({ where: { status: ReceiptStatus.PLEDGED } }),
-        this.prisma.withdrawal.count({
-          where: { status: WithdrawalStatus.COMPLETED },
-        }),
+        this.prisma.receipt.count({ where: { status: ReceiptStatus.WITHDRAWN } }),
       ]);
 
     return {
       totalIssued,
       totalActive,
       totalPledged,
-      totalWithdrawn: totalCompleted,
+      totalWithdrawn,
     };
   }
 

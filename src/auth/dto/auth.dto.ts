@@ -35,7 +35,7 @@ export class UserProfileDto {
   email!: string;
   firstName!: string;
   lastName!: string;
-  roleId?: string | null;
+  roles!: { id: string; name: string }[];
 }
 
 export class BaseResponseDto {

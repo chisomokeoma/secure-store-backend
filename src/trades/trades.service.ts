@@ -10,13 +10,47 @@ import { ReceiptStatus, TradeStatus } from '@prisma/client';
 export class TradesService {
   constructor(private prisma: PrismaService) {}
 
-  async getTradeListings() {
-    const trades = await this.prisma.trade.findMany({
-      where: { status: TradeStatus.LISTED },
-      include: { receipt: { include: { commodity: true } }, seller: true },
-    });
+  async getTrades(filters: {
+    status?: string;
+    page?: string;
+    limit?: string;
+    search?: string;
+  }) {
+    const page = parseInt(filters.page || '1', 10);
+    const limit = parseInt(filters.limit || '10', 10);
+    const skip = (page - 1) * limit;
 
-    return trades.map((t) => ({
+    const where: any = {};
+
+    if (filters.status) {
+      where.status = filters.status as TradeStatus;
+    }
+
+    if (filters.search) {
+      where.OR = [
+        { reference: { contains: filters.search, mode: 'insensitive' } },
+        { receipt: { receiptNumber: { contains: filters.search, mode: 'insensitive' } } },
+        { receipt: { commodity: { name: { contains: filters.search, mode: 'insensitive' } } } },
+        { seller: { firstName: { contains: filters.search, mode: 'insensitive' } } },
+        { seller: { lastName: { contains: filters.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [trades, total] = await Promise.all([
+      this.prisma.trade.findMany({
+        where,
+        include: {
+          receipt: { include: { commodity: true } },
+          seller: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.trade.count({ where }),
+    ]);
+
+    const data = trades.map((t) => ({
       id: t.id,
       reference: t.reference,
       receiptNumber: t.receipt.receiptNumber,
@@ -25,7 +59,19 @@ export class TradesService {
       pricePerUnit: t.pricePerUnit,
       totalPrice: t.totalPrice,
       seller: `${t.seller.firstName} ${t.seller.lastName}`,
+      status: t.status,
+      createdAt: t.createdAt,
     }));
+
+    return {
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 
   async createTrade(

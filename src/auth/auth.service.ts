@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -8,25 +8,29 @@ export class AuthService {
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
-  ) {}
+  ) { }
 
   async login(email: string, password: string) {
-    // 1. Find user by email — include role so we can access user.role.name
+    // 1. Find user by email — iWhat is this error nclude roles
     const user = await this.prisma.user.findUnique({
       where: { email },
-      include: { role: true },
+      include: { roles: true },
     });
-    if (!user) throw new UnauthorizedException('Invalid credentials');
+    if (!user) throw new BadRequestException('Invalid email or password');
 
     // 2. Compare password
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) throw new UnauthorizedException('Invalid credentials');
+    if (!isMatch) throw new BadRequestException('Invalid email or password');
 
-    // 3. Generate JWT token
+    // 3. Extract role data
+    const roleNames = user.roles.map((r) => r.name);
+    const rolesDetail = user.roles.map((r) => ({ id: r.id, name: r.name }));
+
+    // 4. Generate JWT token
     const token = this.jwt.sign({
       sub: user.id,
       email: user.email,
-      role: user.role?.name,
+      roles: roleNames,
     });
 
     return {
@@ -34,7 +38,7 @@ export class AuthService {
       user: {
         id: user.id,
         email: user.email,
-        role: user.role?.name,
+        roles: rolesDetail,
       },
     };
   }

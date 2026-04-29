@@ -6,14 +6,16 @@ import {
   Body,
   HttpCode,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { TradesService } from './trades.service';
 import {
   CreateTradeDto,
   SettleTradeDto,
   TradeListingDto,
   TradeResponseDto,
+  PaginatedTradeResponseDto,
 } from './dto/trades.dto';
 
 @ApiTags('Trades')
@@ -21,11 +23,25 @@ import {
 export class TradesController {
   constructor(private readonly tradesService: TradesService) {}
 
-  @Get('listings')
-  @ApiOperation({ summary: 'Get active trade listings' })
-  @ApiResponse({ status: 200, type: [TradeListingDto] })
-  getTradeListings() {
-    return this.tradesService.getTradeListings();
+  @Get()
+  @ApiOperation({ summary: 'List all trades with filters' })
+  @ApiQuery({ name: 'status', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiQuery({ name: 'search', required: false })
+  @ApiResponse({ status: 200, type: PaginatedTradeResponseDto })
+  getTrades(
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.tradesService.getTrades({
+      status,
+      page,
+      limit,
+      search,
+    });
   }
 
   @Post()

@@ -22,8 +22,34 @@ export class WithdrawalCalculationResponseDto {
   breakdown!: any;
 }
 
+export class WithdrawalListItemDto {
+  id!: string;
+  reference!: string;
+  receiptNumber!: string;
+  commodity!: string;
+  quantity!: number;
+  status!: string;
+  createdAt!: Date;
+}
+
+export class PaginationMetaDto {
+  total!: number;
+  page!: number;
+  limit!: number;
+  totalPages!: number;
+}
+
+export class PaginatedWithdrawalResponseDto {
+  data!: WithdrawalListItemDto[];
+  meta!: PaginationMetaDto;
+}
+
 export class WithdrawalResponseDto {
   id!: string;
   status!: string;
   quantity!: number;
+  reference?: string;
+  fee?: number;
+  reason?: string;
+  plannedDate?: Date;
 }

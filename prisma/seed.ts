@@ -97,7 +97,7 @@ async function main() {
         firstName: u.firstName,
         lastName: u.lastName,
         password: u.password,
-        roleId: role?.id,
+        roles: role ? { connect: { id: role.id } } : undefined,
       },
     });
   }

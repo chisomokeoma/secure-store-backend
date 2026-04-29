@@ -6,20 +6,43 @@ import {
   Body,
   HttpCode,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { WithdrawalsService } from './withdrawals.service';
 import {
   CalculateWithdrawalDto,
   CreateWithdrawalDto,
   WithdrawalCalculationResponseDto,
   WithdrawalResponseDto,
+  PaginatedWithdrawalResponseDto,
 } from './dto/withdrawals.dto';
 
 @ApiTags('Withdrawals')
 @Controller('withdrawals')
 export class WithdrawalsController {
   constructor(private readonly withdrawalsService: WithdrawalsService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'List all withdrawal requests' })
+  @ApiQuery({ name: 'status', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiQuery({ name: 'search', required: false })
+  @ApiResponse({ status: 200, type: PaginatedWithdrawalResponseDto })
+  getWithdrawals(
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.withdrawalsService.getWithdrawals({
+      status,
+      page,
+      limit,
+      search,
+    });
+  }
 
   @Get('eligible-receipts')
   @ApiOperation({ summary: 'Get receipts eligible for withdrawal' })

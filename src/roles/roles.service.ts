@@ -68,8 +68,12 @@ export class RolesService {
 
     return this.prisma.user.update({
       where: { id: userId },
-      data: { roleId },
-      include: { role: true },
+      data: {
+        roles: {
+          connect: { id: roleId },
+        },
+      },
+      include: { roles: true },
     });
   }
 

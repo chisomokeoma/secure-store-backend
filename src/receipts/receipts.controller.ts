@@ -1,7 +1,7 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { ReceiptsService } from './receipts.service';
-import { ReceiptDetailsDto, ReceiptStatsDto } from './dto/receipts.dto';
+import { ReceiptDetailsDto, ReceiptStatsDto, PaginatedReceiptResponseDto } from './dto/receipts.dto';
 
 @ApiTags('Warehouse Receipts')
 @Controller('receipts')
@@ -14,7 +14,7 @@ export class ReceiptsController {
   @ApiQuery({ name: 'page', required: false })
   @ApiQuery({ name: 'limit', required: false })
   @ApiQuery({ name: 'search', required: false })
-  @ApiResponse({ status: 200, type: [ReceiptDetailsDto] })
+  @ApiResponse({ status: 200, type: PaginatedReceiptResponseDto })
   getReceipts(@Query('status') status?: string, @Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
     return this.receiptsService.getReceipts({ status, page, limit, search });
   }

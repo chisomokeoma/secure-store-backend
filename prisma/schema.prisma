@@ -26,6 +26,7 @@ enum ReceiptStatus {
   LIEN
   PLEDGED
   EXPIRED
+  WITHDRAWN
 }
 
 enum WithdrawalStatus {
@@ -63,8 +64,7 @@ model User {
   password  String
   firstName String  @map("first_name")
   lastName  String  @map("last_name")
-  roleId    String? @map("role_id")
-  role      Role?   @relation(fields: [roleId], references: [id])
+  roles     Role[]
 
   receipts    Receipt[]
   withdrawals Withdrawal[]

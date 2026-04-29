@@ -60,7 +60,7 @@ export class AuthController {
             email: 'demo@securestore.com',
             firstName: 'John',
             lastName: 'Doe',
-            roleId: null
+            roles: []
         };
     }
 }

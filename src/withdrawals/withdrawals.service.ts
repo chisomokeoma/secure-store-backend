@@ -14,6 +14,66 @@ import {
 export class WithdrawalsService {
   constructor(private prisma: PrismaService) {}
 
+  async getWithdrawals(filters: {
+    status?: string;
+    page?: string;
+    limit?: string;
+    search?: string;
+  }) {
+    const page = parseInt(filters.page || '1', 10);
+    const limit = parseInt(filters.limit || '10', 10);
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+
+    if (filters.status) {
+      where.status = filters.status as WithdrawalStatus;
+    }
+
+    if (filters.search) {
+      where.OR = [
+        { reference: { contains: filters.search, mode: 'insensitive' } },
+        { receipt: { receiptNumber: { contains: filters.search, mode: 'insensitive' } } },
+        { receipt: { commodity: { name: { contains: filters.search, mode: 'insensitive' } } } },
+      ];
+    }
+
+    const [withdrawals, total] = await Promise.all([
+      this.prisma.withdrawal.findMany({
+        where,
+        include: {
+          receipt: {
+            include: { commodity: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.withdrawal.count({ where }),
+    ]);
+
+    const data = withdrawals.map((w) => ({
+      id: w.id,
+      reference: w.reference,
+      receiptNumber: w.receipt.receiptNumber,
+      commodity: w.receipt.commodity.name,
+      quantity: w.quantity,
+      status: w.status,
+      createdAt: w.createdAt,
+    }));
+
+    return {
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
   async getEligibleReceipts(clientId?: string) {
     const user = clientId
       ? { id: clientId }
@@ -260,11 +320,11 @@ export class WithdrawalsService {
 
       const remainder = parent.quantityAvailable - w.quantity;
 
-      // Cancel the parent receipt (it's been fully accounted for)
+      // Mark the parent receipt as WITHDRAWN (it's been fully accounted for)
       await tx.receipt.update({
         where: { id: parent.id },
         data: {
-          status: ReceiptStatus.CANCELLED,
+          status: ReceiptStatus.WITHDRAWN,
           quantityAvailable: 0,
         },
       });
