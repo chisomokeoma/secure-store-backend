@@ -11,7 +11,7 @@ export class AuthService {
   ) { }
 
   async login(email: string, password: string) {
-    // 1. Find user by email — iWhat is this error nclude roles
+    // 1. Find user by email — include roles
     const user = await this.prisma.user.findUnique({
       where: { email },
       include: { roles: true },
