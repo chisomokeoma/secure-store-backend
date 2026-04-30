@@ -22,15 +22,14 @@ export class AuthService {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) throw new BadRequestException('Invalid email or password');
 
-    // 3. Extract role data
-    const roleNames = user.roles.map((r) => r.name);
-    const rolesDetail = user.roles.map((r) => ({ id: r.id, name: r.name }));
+    // 3. Extract role names
+    const roles = user.roles.map((r) => r.name);
 
     // 4. Generate JWT token
     const token = this.jwt.sign({
       sub: user.id,
       email: user.email,
-      roles: roleNames,
+      roles: roles,
     });
 
     return {
@@ -38,7 +37,7 @@ export class AuthService {
       user: {
         id: user.id,
         email: user.email,
-        roles: rolesDetail,
+        roles: roles,
       },
     };
   }

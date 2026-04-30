@@ -91,7 +91,9 @@ async function main() {
     const role = await prisma.role.findUnique({ where: { name: u.roleName } });
     await prisma.user.upsert({
       where: { email: u.email },
-      update: {},
+      update: {
+        roles: role ? { connect: { id: role.id } } : undefined,
+      },
       create: {
         email: u.email,
         firstName: u.firstName,

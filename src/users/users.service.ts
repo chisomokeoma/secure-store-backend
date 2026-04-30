@@ -18,7 +18,7 @@ export class UsersService {
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
-      roles: user.roles.map((r) => ({ id: r.id, name: r.name })),
+      roles: user.roles.map((r) => r.name),
     };
   }
 
@@ -39,7 +39,7 @@ export class UsersService {
       email: updated.email,
       firstName: updated.firstName,
       lastName: updated.lastName,
-      roles: updated.roles.map((r) => ({ id: r.id, name: r.name })),
+      roles: updated.roles.map((r) => r.name),
     };
   }
 }
