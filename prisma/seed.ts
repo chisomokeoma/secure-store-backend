@@ -48,58 +48,65 @@ async function main() {
       firstName: 'Admin',
       lastName: 'User',
       password: passwordHash,
-      roleName: 'GLOBAL_ADMIN',
+      roleNames: ['GLOBAL_ADMIN'],
     },
     {
       email: 'tenant@securestore.com',
       firstName: 'Tenant',
       lastName: 'Admin',
       password: passwordHash,
-      roleName: 'TENANT_ADMIN',
+      roleNames: ['TENANT_ADMIN'],
     },
     {
       email: 'manager@securestore.com',
       firstName: 'Funtua',
       lastName: 'Manager',
       password: passwordHash,
-      roleName: 'WAREHOUSE_MANAGER',
+      roleNames: ['WAREHOUSE_MANAGER'],
     },
     {
       email: 'manager2@securestore.com',
       firstName: 'Lagos',
       lastName: 'Manager',
       password: passwordHash,
-      roleName: 'WAREHOUSE_MANAGER',
+      roleNames: ['WAREHOUSE_MANAGER'],
     },
     {
       email: 'firstbank@securestore.com',
       firstName: 'First',
       lastName: 'Bank',
       password: passwordHash,
-      roleName: 'FINANCIER',
+      roleNames: ['FINANCIER'],
     },
     {
       email: 'demo@securestore.com',
       firstName: 'John',
       lastName: 'Doe',
       password: passwordHash,
-      roleName: 'CLIENT',
+      roleNames: ['CLIENT', 'WAREHOUSE_MANAGER'], // 👈 Added WAREHOUSE_MANAGER
     },
   ];
 
   for (const u of users) {
-    const role = await prisma.role.findUnique({ where: { name: u.roleName } });
+    const roleIds = (
+      await Promise.all(
+        u.roleNames.map((name) => prisma.role.findUnique({ where: { name } })),
+      )
+    )
+      .filter((r) => r !== null)
+      .map((r) => ({ id: r!.id }));
+
     await prisma.user.upsert({
       where: { email: u.email },
       update: {
-        roles: role ? { connect: { id: role.id } } : undefined,
+        roles: { set: roleIds },
       },
       create: {
         email: u.email,
         firstName: u.firstName,
         lastName: u.lastName,
         password: u.password,
-        roles: role ? { connect: { id: role.id } } : undefined,
+        roles: { connect: roleIds },
       },
     });
   }
