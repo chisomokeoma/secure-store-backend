@@ -83,7 +83,7 @@ async function main() {
       firstName: 'John',
       lastName: 'Doe',
       password: passwordHash,
-      roleNames: ['CLIENT', 'WAREHOUSE_MANAGER'], // 👈 Added WAREHOUSE_MANAGER
+      roleNames: ['CLIENT', 'WAREHOUSE_MANAGER', 'TENANT_ADMIN'], // 👈 Added WAREHOUSE_MANAGER & TENANT_ADMIN
     },
   ];
 
