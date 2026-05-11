@@ -1,33 +1,186 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { UserStatus, WarehouseStatus } from '@prisma/client';
-import * as bcrypt from 'bcrypt';
+import { ReceiptStatus, WarehouseStatus } from '@prisma/client';
 
 @Injectable()
 export class AdminWarehouseService {
   constructor(private prisma: PrismaService) {}
 
-  async getWarehouses(tenantId: string) {
-    return this.prisma.warehouse.findMany({
-      where: { tenantId },
-      include: {
-        managerAssignments: {
-          include: {
-            manager: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                status: true,
+  // ─── LIST ──────────────────────────────────────────────────────────────────
+
+  async getWarehouses(
+    tenantId: string,
+    query: { status?: string; search?: string; page?: string; limit?: string },
+  ) {
+    const page = parseInt(query.page || '1', 10);
+    const limit = Math.min(parseInt(query.limit || '20', 10), 100);
+    const skip = (page - 1) * limit;
+
+    const where: any = { tenantId };
+    if (query.status) where.status = query.status;
+    if (query.search) {
+      where.OR = [
+        { name: { contains: query.search, mode: 'insensitive' } },
+        { code: { contains: query.search, mode: 'insensitive' } },
+        { location: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [warehouses, total] = await Promise.all([
+      this.prisma.warehouse.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          managerAssignments: {
+            where: { unassignedAt: null },
+            include: {
+              manager: {
+                select: { id: true, firstName: true, lastName: true, managerCode: true },
               },
             },
           },
+          _count: { select: { receipts: true } },
+        },
+      }),
+      this.prisma.warehouse.count({ where }),
+    ]);
+
+    // Aggregate stats
+    const allWarehouses = await this.prisma.warehouse.findMany({
+      where: { tenantId },
+      select: { capacityMt: true, status: true },
+    });
+    const totalCapacityMt = allWarehouses.reduce((s, w) => s + (w.capacityMt ?? 0), 0);
+
+    // Total utilized: sum of quantityAvailable on active receipts
+    const utilizationAgg = await this.prisma.receipt.aggregate({
+      where: { tenantId, status: ReceiptStatus.ACTIVE },
+      _sum: { quantityAvailable: true },
+    });
+    const totalUtilizationMt = utilizationAgg._sum.quantityAvailable ?? 0;
+
+    return {
+      stats: {
+        totalWarehouses: allWarehouses.length,
+        totalCapacityMt,
+        totalUtilizationMt,
+      },
+      data: warehouses,
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  // ─── DETAIL ────────────────────────────────────────────────────────────────
+
+  async getWarehouseById(tenantId: string, id: string) {
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id, tenantId },
+      include: {
+        managerAssignments: {
           where: { unassignedAt: null },
+          include: {
+            manager: {
+              select: { id: true, firstName: true, lastName: true, email: true, managerCode: true },
+            },
+          },
+        },
+        warehouseCommodities: {
+          include: { commodity: { select: { id: true, name: true, unitOfMeasure: true } } },
+        },
+      },
+    });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+
+    // Summary stats
+    const [totalClients, totalReceipts, commodityAgg] = await Promise.all([
+      this.prisma.receipt.groupBy({
+        by: ['clientId'],
+        where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
+      }).then((r) => r.length),
+      this.prisma.receipt.count({ where: { warehouseId: id, tenantId } }),
+      this.prisma.receipt.aggregate({
+        where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
+        _sum: { quantityAvailable: true },
+      }),
+    ]);
+
+    const recentReceipts = await this.prisma.receipt.findMany({
+      where: { warehouseId: id, tenantId },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      include: {
+        commodity: { select: { name: true, unitOfMeasure: true } },
+        client: { select: { firstName: true, lastName: true } },
+      },
+    });
+
+    return {
+      warehouse,
+      managers: warehouse.managerAssignments.map((a) => a.manager),
+      summary: {
+        totalClients,
+        totalCommodityMt: commodityAgg._sum.quantityAvailable ?? 0,
+        totalReceipts,
+        currency: 'NGN',
+      },
+      recentReceipts,
+    };
+  }
+
+  // ─── RECEIPTS FOR A WAREHOUSE ───────────────────────────────────────────────
+
+  async getWarehouseReceipts(
+    tenantId: string,
+    warehouseId: string,
+    query: { status?: string; approvalStatus?: string; page?: string; limit?: string },
+  ) {
+    const warehouse = await this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+
+    const page = parseInt(query.page || '1', 10);
+    const limit = Math.min(parseInt(query.limit || '20', 10), 100);
+    const skip = (page - 1) * limit;
+
+    const where: any = { warehouseId, tenantId };
+    if (query.status) where.status = query.status;
+    if (query.approvalStatus) where.approvalStatus = query.approvalStatus;
+
+    const [receipts, total] = await Promise.all([
+      this.prisma.receipt.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          commodity: { select: { name: true, unitOfMeasure: true } },
+          client: { select: { id: true, firstName: true, lastName: true } },
+        },
+      }),
+      this.prisma.receipt.count({ where }),
+    ]);
+
+    return { data: receipts, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  }
+
+  // ─── MANAGERS FOR A WAREHOUSE ───────────────────────────────────────────────
+
+  async getWarehouseManagers(tenantId: string, warehouseId: string) {
+    const warehouse = await this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+
+    return this.prisma.warehouseManagerAssignment.findMany({
+      where: { warehouseId, tenantId, unassignedAt: null },
+      include: {
+        manager: {
+          select: { id: true, firstName: true, lastName: true, email: true, managerCode: true, status: true },
         },
       },
     });
   }
+
+  // ─── CREATE ────────────────────────────────────────────────────────────────
 
   async createWarehouse(
     tenantId: string,
@@ -35,146 +188,130 @@ export class AdminWarehouseService {
       name: string;
       location: string;
       code?: string;
+      type?: string;
+      state?: string;
+      address?: string;
       capacityMt?: number;
+      commodityIds?: string[];
+      managerIds?: string[];
     },
   ) {
-    return this.prisma.warehouse.create({
-      data: {
-        ...dto,
-        tenantId,
-        status: WarehouseStatus.ACTIVE,
-      },
+    const { commodityIds = [], managerIds = [], ...warehouseData } = dto;
+
+    return this.prisma.$transaction(async (tx) => {
+      const warehouse = await tx.warehouse.create({
+        data: {
+          ...warehouseData,
+          tenantId,
+          status: WarehouseStatus.ACTIVE,
+        },
+      });
+
+      // Link commodities via WarehouseCommodity upsert
+      for (const commodityId of commodityIds) {
+        await tx.warehouseCommodity.upsert({
+          where: { warehouseId_commodityId: { warehouseId: warehouse.id, commodityId } },
+          create: { warehouseId: warehouse.id, commodityId, tenantId, storageFeePerUnit: 0 },
+          update: {},
+        });
+      }
+
+      // Assign managers if provided
+      if (managerIds.length > 0) {
+        await tx.warehouseManagerAssignment.createMany({
+          data: managerIds.map((managerId) => ({
+            tenantId,
+            warehouseId: warehouse.id,
+            managerId,
+            assignedBy: managerId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      return warehouse;
     });
   }
 
-  // --- Warehouse Manager User Management ---
+  // ─── UPDATE ────────────────────────────────────────────────────────────────
 
-  async getManagers(tenantId: string) {
-    return this.prisma.user.findMany({
-      where: {
-        tenantId,
-        roles: {
-          some: { role: { name: 'WAREHOUSE_MANAGER' } },
-        },
-      },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        phoneNumber: true,
-        status: true,
-        createdAt: true,
-        managerAssignments: {
-          where: { unassignedAt: null },
-          include: {
-            warehouse: { select: { id: true, name: true } },
-          },
-        },
-      },
-    });
-  }
-
-  async createManager(
+  async updateWarehouse(
     tenantId: string,
+    id: string,
     dto: {
-      email: string;
-      firstName: string;
-      lastName: string;
-      password: string;
-      phoneNumber?: string;
+      name?: string;
+      location?: string;
+      code?: string;
+      type?: string;
+      state?: string;
+      address?: string;
+      capacityMt?: number;
+      status?: WarehouseStatus;
     },
   ) {
-    // 1. Check if email already in use
-    const existing = await this.prisma.user.findUnique({
-      where: { email: dto.email },
-    });
-    if (existing) throw new ConflictException('A user with this email already exists');
-
-    // 2. Get WAREHOUSE_MANAGER role
-    const managerRole = await this.prisma.role.findUnique({
-      where: { name: 'WAREHOUSE_MANAGER' },
-    });
-    if (!managerRole) throw new BadRequestException('WAREHOUSE_MANAGER role not found. Ensure seed has been run.');
-
-    // 3. Hash the password
-    const hashedPassword = await bcrypt.hash(dto.password, 10);
-
-    // 4. Create user with WAREHOUSE_MANAGER role
-    return this.prisma.user.create({
-      data: {
-        email: dto.email,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-        password: hashedPassword,
-        phoneNumber: dto.phoneNumber,
-        tenantId,
-        status: UserStatus.ACTIVE,
-        roles: {
-          create: {
-            roleId: managerRole.id,
-          },
-        },
-      },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        phoneNumber: true,
-        status: true,
-        createdAt: true,
-      },
-    });
-  }
-
-  async assignManager(
-    tenantId: string,
-    warehouseId: string,
-    managerId: string,
-    assignedBy: string,
-  ) {
-    // 1. Verify warehouse belongs to tenant
-    const warehouse = await this.prisma.warehouse.findFirst({
-      where: { id: warehouseId, tenantId },
-    });
+    const warehouse = await this.prisma.warehouse.findFirst({ where: { id, tenantId } });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
-    // 2. Verify manager belongs to tenant and has the right role
-    const manager = await this.prisma.user.findFirst({
-      where: {
-        id: managerId,
-        tenantId,
-        roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } },
-      },
-    });
-    if (!manager) throw new NotFoundException('Warehouse Manager not found in this tenant');
+    return this.prisma.warehouse.update({ where: { id }, data: dto });
+  }
 
-    // 3. Check if already assigned to this warehouse
-    const existing = await this.prisma.warehouseManagerAssignment.findFirst({
-      where: { warehouseId, managerId, unassignedAt: null },
-    });
-    if (existing) throw new ConflictException('Manager is already assigned to this warehouse');
+  // ─── COMMODITY LINKING ─────────────────────────────────────────────────────
 
-    // 4. Create assignment
-    return this.prisma.warehouseManagerAssignment.create({
-      data: { tenantId, warehouseId, managerId, assignedBy },
-      include: {
-        warehouse: { select: { id: true, name: true } },
-        manager: { select: { id: true, firstName: true, lastName: true, email: true } },
-      },
+  async addCommodity(tenantId: string, warehouseId: string, commodityId: string) {
+    const [warehouse, commodity] = await Promise.all([
+      this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } }),
+      this.prisma.commodity.findFirst({ where: { id: commodityId, tenantId } }),
+    ]);
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+    if (!commodity) throw new NotFoundException('Commodity not found');
+
+    return this.prisma.warehouseCommodity.upsert({
+      where: { warehouseId_commodityId: { warehouseId, commodityId } },
+      create: { warehouseId, commodityId, tenantId, storageFeePerUnit: 0 },
+      update: {},
     });
   }
 
-  async unassignManager(tenantId: string, warehouseId: string, managerId: string) {
-    const assignment = await this.prisma.warehouseManagerAssignment.findFirst({
-      where: { warehouseId, managerId, tenantId, unassignedAt: null },
+  async removeCommodity(tenantId: string, warehouseId: string, commodityId: string) {
+    const wc = await this.prisma.warehouseCommodity.findFirst({
+      where: { warehouseId, commodityId, tenantId },
     });
-    if (!assignment) throw new NotFoundException('Active assignment not found');
+    if (!wc) throw new NotFoundException('Commodity not linked to this warehouse');
 
-    return this.prisma.warehouseManagerAssignment.update({
-      where: { id: assignment.id },
-      data: { unassignedAt: new Date() },
+    const hasActiveReceipts = await this.prisma.receipt.count({
+      where: { warehouseId, commodityId, tenantId, status: ReceiptStatus.ACTIVE },
     });
+    if (hasActiveReceipts > 0) {
+      throw new BadRequestException('Cannot remove commodity: there are active receipts for it in this warehouse');
+    }
+
+    return this.prisma.warehouseCommodity.delete({ where: { id: wc.id } });
+  }
+
+  // ─── BULK MANAGER ASSIGNMENT ───────────────────────────────────────────────
+
+  async assignManagers(
+    tenantId: string,
+    warehouseId: string,
+    managerIds: string[],
+    assignedBy: string,
+  ) {
+    const warehouse = await this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+
+    const existing = await this.prisma.warehouseManagerAssignment.findMany({
+      where: { warehouseId, tenantId, unassignedAt: null },
+      select: { managerId: true },
+    });
+    const existingIds = new Set(existing.map((e) => e.managerId));
+    const newIds = managerIds.filter((id) => !existingIds.has(id));
+
+    if (newIds.length > 0) {
+      await this.prisma.warehouseManagerAssignment.createMany({
+        data: newIds.map((managerId) => ({ tenantId, warehouseId, managerId, assignedBy })),
+      });
+    }
+
+    return { assigned: newIds.length, alreadyAssigned: managerIds.length - newIds.length };
   }
 }

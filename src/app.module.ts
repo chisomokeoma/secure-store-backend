@@ -19,6 +19,10 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { ReportsModule } from './reports/reports.module';
 import { AdminModule } from './admin/admin.module';
+import { ManagersModule } from './managers/managers.module';
+import { GradingModule } from './grading/grading.module';
+import { StorageFeesModule } from './storage-fees/storage-fees.module';
+import { MeModule } from './me/me.module';
 
 @Module({
   imports: [
@@ -40,6 +44,10 @@ import { AdminModule } from './admin/admin.module';
     DashboardModule,
     ReportsModule,
     AdminModule,
+    ManagersModule,
+    GradingModule,
+    StorageFeesModule,
+    MeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

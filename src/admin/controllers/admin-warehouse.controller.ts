@@ -1,19 +1,8 @@
 import {
-  Controller,
-  Get,
-  Post,
-  Delete,
-  Body,
-  Param,
-  UseGuards,
+  Controller, Get, Post, Patch, Delete,
+  Body, Param, Query, UseGuards,
 } from '@nestjs/common';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiBearerAuth,
-  ApiParam,
-  ApiBody,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiParam, ApiBody } from '@nestjs/swagger';
 import { AdminWarehouseService } from '../services/admin-warehouse.service';
 import { JwtAuthGuard } from '../../auth/jwt.guard';
 import { RolesGuard } from '../../auth/roles.guard';
@@ -26,14 +15,57 @@ import { CurrentUser } from '../../common/decorators/user.decorator';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('admin/warehouses')
 export class AdminWarehouseController {
-  constructor(private readonly adminWarehouseService: AdminWarehouseService) {}
-
-  // --- Warehouse CRUD ---
+  constructor(private readonly service: AdminWarehouseService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all warehouses for the tenant' })
-  getWarehouses(@CurrentUser('tenantId') tenantId: string) {
-    return this.adminWarehouseService.getWarehouses(tenantId);
+  @ApiOperation({ summary: 'List all warehouses with stats and filters' })
+  @ApiQuery({ name: 'status', required: false, enum: ['ACTIVE', 'INACTIVE', 'MAINTENANCE'] })
+  @ApiQuery({ name: 'search', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  getWarehouses(
+    @CurrentUser('tenantId') tenantId: string,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.service.getWarehouses(tenantId, { status, search, page, limit });
+  }
+
+  @Get(':id')
+  @ApiOperation({ summary: 'Get full warehouse detail with managers, summary, recent receipts' })
+  getWarehouseById(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.service.getWarehouseById(tenantId, id);
+  }
+
+  @Get(':id/receipts')
+  @ApiOperation({ summary: 'Get receipts for a specific warehouse' })
+  @ApiQuery({ name: 'status', required: false })
+  @ApiQuery({ name: 'approvalStatus', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  getWarehouseReceipts(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Query('status') status?: string,
+    @Query('approvalStatus') approvalStatus?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.service.getWarehouseReceipts(tenantId, id, { status, approvalStatus, page, limit });
+  }
+
+  @Get(':id/managers')
+  @ApiOperation({ summary: 'Get managers currently assigned to a warehouse' })
+  getWarehouseManagers(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.service.getWarehouseManagers(tenantId, id);
   }
 
   @Post()
@@ -45,80 +77,60 @@ export class AdminWarehouseController {
       properties: {
         name: { type: 'string' },
         location: { type: 'string' },
-        code: { type: 'string' },
+        code: { type: 'string', example: 'WHS-001' },
+        type: { type: 'string', example: 'DRY_GOODS' },
+        state: { type: 'string', example: 'Kano State' },
+        address: { type: 'string' },
         capacityMt: { type: 'number' },
+        commodityIds: { type: 'array', items: { type: 'string' } },
+        managerIds: { type: 'array', items: { type: 'string' } },
       },
     },
   })
-  createWarehouse(
+  createWarehouse(@CurrentUser('tenantId') tenantId: string, @Body() body: any) {
+    return this.service.createWarehouse(tenantId, body);
+  }
+
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update warehouse details' })
+  updateWarehouse(
     @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
     @Body() body: any,
   ) {
-    return this.adminWarehouseService.createWarehouse(tenantId, body);
+    return this.service.updateWarehouse(tenantId, id, body);
   }
 
-  // --- Warehouse Manager User Management ---
-
-  @Get('managers')
-  @ApiOperation({ summary: 'List all Warehouse Managers in the tenant' })
-  getManagers(@CurrentUser('tenantId') tenantId: string) {
-    return this.adminWarehouseService.getManagers(tenantId);
-  }
-
-  @Post('managers')
-  @ApiOperation({ summary: 'Create a new Warehouse Manager user account' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      required: ['email', 'firstName', 'lastName', 'password'],
-      properties: {
-        email: { type: 'string', example: 'manager@warehouse.com' },
-        firstName: { type: 'string' },
-        lastName: { type: 'string' },
-        password: { type: 'string', example: 'SecurePass123!' },
-        phoneNumber: { type: 'string' },
-      },
-    },
-  })
-  createManager(
-    @CurrentUser('tenantId') tenantId: string,
-    @Body() body: any,
-  ) {
-    return this.adminWarehouseService.createManager(tenantId, body);
-  }
-
-  // --- Manager Assignment to Warehouse ---
-
-  @Post(':id/managers')
-  @ApiOperation({ summary: 'Assign an existing Warehouse Manager to a warehouse' })
-  @ApiParam({ name: 'id', description: 'Warehouse ID' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      required: ['managerId'],
-      properties: {
-        managerId: { type: 'string' },
-      },
-    },
-  })
-  assignManager(
+  @Post(':id/assign-managers')
+  @ApiOperation({ summary: 'Bulk assign managers to a warehouse' })
+  @ApiBody({ schema: { type: 'object', properties: { managerIds: { type: 'array', items: { type: 'string' } } } } })
+  assignManagers(
     @CurrentUser('tenantId') tenantId: string,
     @CurrentUser('id') userId: string,
     @Param('id') id: string,
-    @Body('managerId') managerId: string,
+    @Body('managerIds') managerIds: string[],
   ) {
-    return this.adminWarehouseService.assignManager(tenantId, id, managerId, userId);
+    return this.service.assignManagers(tenantId, id, managerIds, userId);
   }
 
-  @Delete(':id/managers/:managerId')
-  @ApiOperation({ summary: 'Unassign a Warehouse Manager from a warehouse' })
-  @ApiParam({ name: 'id', description: 'Warehouse ID' })
-  @ApiParam({ name: 'managerId', description: 'Manager User ID' })
-  unassignManager(
+  @Post(':id/commodities')
+  @ApiOperation({ summary: 'Link a commodity to a warehouse' })
+  @ApiBody({ schema: { type: 'object', properties: { commodityId: { type: 'string' } } } })
+  addCommodity(
     @CurrentUser('tenantId') tenantId: string,
-    @Param('id') warehouseId: string,
-    @Param('managerId') managerId: string,
+    @Param('id') id: string,
+    @Body('commodityId') commodityId: string,
   ) {
-    return this.adminWarehouseService.unassignManager(tenantId, warehouseId, managerId);
+    return this.service.addCommodity(tenantId, id, commodityId);
+  }
+
+  @Delete(':id/commodities/:commodityId')
+  @ApiOperation({ summary: 'Unlink a commodity from a warehouse' })
+  removeCommodity(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Param('commodityId') commodityId: string,
+  ) {
+    return this.service.removeCommodity(tenantId, id, commodityId);
   }
 }
