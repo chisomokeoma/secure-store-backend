@@ -1,6 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { FeeType, BillingFrequency } from '@prisma/client';
-import { IsEnum, IsNumber, IsOptional, IsUUID, IsBoolean } from 'class-validator';
+import { IsEnum, IsNumber, IsOptional, IsUUID, IsBoolean, IsString } from 'class-validator';
 
 export class CreateStorageFeePolicyDto {
   @ApiProperty({ required: false })
@@ -49,4 +49,4 @@ export class StorageFeePolicyDto extends CreateStorageFeePolicyDto {
   id!: string;
 }
 
-import { IsString } from 'class-validator';
+
