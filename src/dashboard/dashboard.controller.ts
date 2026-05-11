@@ -19,13 +19,14 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { CurrentUser } from '../common/decorators/user.decorator';
 
-@ApiTags('Admin Dashboard')
+@ApiTags('Dashboard')
 @ApiBearerAuth()
-@Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Controller('admin/dashboard')
+@UseGuards(JwtAuthGuard)
+@Controller('dashboard')
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
+
+  // -- General Dashboard Endpoints (accessible to all authenticated users) --
 
   @Get('summary')
   @ApiOperation({ summary: 'Get high-level dashboard metrics' })
@@ -59,8 +60,12 @@ export class DashboardController {
     return this.dashboardService.getRecentActivities(tenantId);
   }
 
+  // -- Admin-only Drill-down Endpoints --
+
   @Get('clients/:id/summary')
-  @ApiOperation({ summary: 'Get detailed summary for a specific client' })
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
+  @UseGuards(RolesGuard)
+  @ApiOperation({ summary: 'Get detailed summary for a specific client (Admin only)' })
   @ApiParam({ name: 'id' })
   getClientDrilldown(
     @CurrentUser('tenantId') tenantId: string,
@@ -70,7 +75,9 @@ export class DashboardController {
   }
 
   @Get('commodities/:id/summary')
-  @ApiOperation({ summary: 'Get detailed summary for a specific commodity' })
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
+  @UseGuards(RolesGuard)
+  @ApiOperation({ summary: 'Get detailed summary for a specific commodity (Admin only)' })
   @ApiParam({ name: 'id' })
   getCommodityDrilldown(
     @CurrentUser('tenantId') tenantId: string,

@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { WarehouseStatus } from '@prisma/client';
+import { UserStatus, WarehouseStatus } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class AdminWarehouseService {
@@ -11,7 +12,17 @@ export class AdminWarehouseService {
       where: { tenantId },
       include: {
         managerAssignments: {
-          include: { manager: true },
+          include: {
+            manager: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                status: true,
+              },
+            },
+          },
           where: { unassignedAt: null },
         },
       },
@@ -36,6 +47,87 @@ export class AdminWarehouseService {
     });
   }
 
+  // --- Warehouse Manager User Management ---
+
+  async getManagers(tenantId: string) {
+    return this.prisma.user.findMany({
+      where: {
+        tenantId,
+        roles: {
+          some: { role: { name: 'WAREHOUSE_MANAGER' } },
+        },
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        phoneNumber: true,
+        status: true,
+        createdAt: true,
+        managerAssignments: {
+          where: { unassignedAt: null },
+          include: {
+            warehouse: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+  }
+
+  async createManager(
+    tenantId: string,
+    dto: {
+      email: string;
+      firstName: string;
+      lastName: string;
+      password: string;
+      phoneNumber?: string;
+    },
+  ) {
+    // 1. Check if email already in use
+    const existing = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
+    if (existing) throw new ConflictException('A user with this email already exists');
+
+    // 2. Get WAREHOUSE_MANAGER role
+    const managerRole = await this.prisma.role.findUnique({
+      where: { name: 'WAREHOUSE_MANAGER' },
+    });
+    if (!managerRole) throw new BadRequestException('WAREHOUSE_MANAGER role not found. Ensure seed has been run.');
+
+    // 3. Hash the password
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
+
+    // 4. Create user with WAREHOUSE_MANAGER role
+    return this.prisma.user.create({
+      data: {
+        email: dto.email,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        password: hashedPassword,
+        phoneNumber: dto.phoneNumber,
+        tenantId,
+        status: UserStatus.ACTIVE,
+        roles: {
+          create: {
+            roleId: managerRole.id,
+          },
+        },
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        phoneNumber: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+  }
+
   async assignManager(
     tenantId: string,
     warehouseId: string,
@@ -48,20 +140,41 @@ export class AdminWarehouseService {
     });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
-    // 2. Verify manager belongs to tenant
+    // 2. Verify manager belongs to tenant and has the right role
     const manager = await this.prisma.user.findFirst({
-      where: { id: managerId, tenantId },
-    });
-    if (!manager) throw new NotFoundException('Manager not found');
-
-    // 3. Create assignment
-    return this.prisma.warehouseManagerAssignment.create({
-      data: {
+      where: {
+        id: managerId,
         tenantId,
-        warehouseId,
-        managerId,
-        assignedBy,
+        roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } },
       },
+    });
+    if (!manager) throw new NotFoundException('Warehouse Manager not found in this tenant');
+
+    // 3. Check if already assigned to this warehouse
+    const existing = await this.prisma.warehouseManagerAssignment.findFirst({
+      where: { warehouseId, managerId, unassignedAt: null },
+    });
+    if (existing) throw new ConflictException('Manager is already assigned to this warehouse');
+
+    // 4. Create assignment
+    return this.prisma.warehouseManagerAssignment.create({
+      data: { tenantId, warehouseId, managerId, assignedBy },
+      include: {
+        warehouse: { select: { id: true, name: true } },
+        manager: { select: { id: true, firstName: true, lastName: true, email: true } },
+      },
+    });
+  }
+
+  async unassignManager(tenantId: string, warehouseId: string, managerId: string) {
+    const assignment = await this.prisma.warehouseManagerAssignment.findFirst({
+      where: { warehouseId, managerId, tenantId, unassignedAt: null },
+    });
+    if (!assignment) throw new NotFoundException('Active assignment not found');
+
+    return this.prisma.warehouseManagerAssignment.update({
+      where: { id: assignment.id },
+      data: { unassignedAt: new Date() },
     });
   }
 }
