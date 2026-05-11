@@ -7,8 +7,16 @@ import {
   HttpCode,
   HttpStatus,
   Query,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+  ApiQuery,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { TradesService } from './trades.service';
 import {
   CreateTradeDto,
@@ -17,8 +25,12 @@ import {
   TradeResponseDto,
   PaginatedTradeResponseDto,
 } from './dto/trades.dto';
+import { JwtAuthGuard } from '../auth/jwt.guard';
+import { CurrentUser } from '../common/decorators/user.decorator';
 
 @ApiTags('Trades')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 @Controller('trades')
 export class TradesController {
   constructor(private readonly tradesService: TradesService) {}
@@ -31,12 +43,13 @@ export class TradesController {
   @ApiQuery({ name: 'search', required: false })
   @ApiResponse({ status: 200, type: PaginatedTradeResponseDto })
   getTrades(
+    @CurrentUser('tenantId') tenantId: string,
     @Query('status') status?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
-    return this.tradesService.getTrades({
+    return this.tradesService.getTrades(tenantId, {
       status,
       page,
       limit,
@@ -49,8 +62,12 @@ export class TradesController {
     summary: 'Create a new trade listing — locks the receipt with LIEN status',
   })
   @ApiResponse({ status: 201, type: TradeResponseDto })
-  createTrade(@Body() body: CreateTradeDto) {
-    return this.tradesService.createTrade(body);
+  createTrade(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Body() body: CreateTradeDto,
+  ) {
+    return this.tradesService.createTrade(tenantId, body, userId);
   }
 
   @Post(':id/settle')
@@ -61,8 +78,12 @@ export class TradesController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: TradeResponseDto })
-  settleTrade(@Param('id') id: string, @Body() body: SettleTradeDto) {
-    return this.tradesService.settleTrade(id, body.buyerId);
+  settleTrade(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Body() body: SettleTradeDto,
+  ) {
+    return this.tradesService.settleTrade(tenantId, id, body.buyerId);
   }
 
   @Post(':id/cancel')
@@ -72,15 +93,21 @@ export class TradesController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: TradeResponseDto })
-  cancelTrade(@Param('id') id: string) {
-    return this.tradesService.cancelTrade(id);
+  cancelTrade(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.tradesService.cancelTrade(tenantId, id);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get specific trade detail' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: TradeListingDto })
-  getTradeDetail(@Param('id') id: string) {
-    return this.tradesService.getTradeDetail(id);
+  getTradeDetail(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.tradesService.getTradeDetail(tenantId, id);
   }
 }

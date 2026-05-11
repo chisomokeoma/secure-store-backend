@@ -7,8 +7,16 @@ import {
   HttpCode,
   HttpStatus,
   Query,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+  ApiQuery,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { WithdrawalsService } from './withdrawals.service';
 import {
   CalculateWithdrawalDto,
@@ -17,8 +25,12 @@ import {
   WithdrawalResponseDto,
   PaginatedWithdrawalResponseDto,
 } from './dto/withdrawals.dto';
+import { JwtAuthGuard } from '../auth/jwt.guard';
+import { CurrentUser } from '../common/decorators/user.decorator';
 
 @ApiTags('Withdrawals')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 @Controller('withdrawals')
 export class WithdrawalsController {
   constructor(private readonly withdrawalsService: WithdrawalsService) {}
@@ -31,12 +43,13 @@ export class WithdrawalsController {
   @ApiQuery({ name: 'search', required: false })
   @ApiResponse({ status: 200, type: PaginatedWithdrawalResponseDto })
   getWithdrawals(
+    @CurrentUser('tenantId') tenantId: string,
     @Query('status') status?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
-    return this.withdrawalsService.getWithdrawals({
+    return this.withdrawalsService.getWithdrawals(tenantId, {
       status,
       page,
       limit,
@@ -47,31 +60,48 @@ export class WithdrawalsController {
   @Get('eligible-receipts')
   @ApiOperation({ summary: 'Get receipts eligible for withdrawal' })
   @ApiResponse({ status: 200, description: 'List of eligible receipts' })
-  getEligibleReceipts() {
-    return this.withdrawalsService.getEligibleReceipts();
+  getEligibleReceipts(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.withdrawalsService.getEligibleReceipts(tenantId, userId);
   }
 
   @Get('receipts/:receiptId/prefill')
   @ApiOperation({ summary: 'Prefill withdrawal data for a receipt' })
   @ApiParam({ name: 'receiptId' })
   @ApiResponse({ status: 200, description: 'Prefill data' })
-  getReceiptPrefill(@Param('receiptId') receiptId: string) {
-    return this.withdrawalsService.getReceiptPrefill(receiptId);
+  getReceiptPrefill(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('receiptId') receiptId: string,
+  ) {
+    return this.withdrawalsService.getReceiptPrefill(tenantId, receiptId);
   }
 
   @Post('calculate')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Calculate fees for a proposed withdrawal' })
   @ApiResponse({ status: 200, type: WithdrawalCalculationResponseDto })
-  calculateWithdrawal(@Body() body: CalculateWithdrawalDto) {
-    return this.withdrawalsService.calculateWithdrawal(body);
+  calculateWithdrawal(
+    @CurrentUser('tenantId') tenantId: string,
+    @Body() body: CalculateWithdrawalDto,
+  ) {
+    return this.withdrawalsService.calculateWithdrawal(tenantId, body);
   }
 
   @Post()
   @ApiOperation({ summary: 'Create a new withdrawal request' })
   @ApiResponse({ status: 201, type: WithdrawalResponseDto })
-  createWithdrawalRequest(@Body() body: CreateWithdrawalDto) {
-    return this.withdrawalsService.createWithdrawalRequest(body);
+  createWithdrawalRequest(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Body() body: CreateWithdrawalDto,
+  ) {
+    return this.withdrawalsService.createWithdrawalRequest(
+      tenantId,
+      body,
+      userId,
+    );
   }
 
   @Post(':id/confirm-payment')
@@ -81,8 +111,11 @@ export class WithdrawalsController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: WithdrawalResponseDto })
-  confirmPayment(@Param('id') id: string) {
-    return this.withdrawalsService.confirmPayment(id);
+  confirmPayment(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.withdrawalsService.confirmPayment(tenantId, id);
   }
 
   @Post(':id/approve')
@@ -92,8 +125,11 @@ export class WithdrawalsController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: WithdrawalResponseDto })
-  approveWithdrawal(@Param('id') id: string) {
-    return this.withdrawalsService.approveWithdrawal(id);
+  approveWithdrawal(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.withdrawalsService.approveWithdrawal(tenantId, id);
   }
 
   @Post(':id/reject')
@@ -101,8 +137,11 @@ export class WithdrawalsController {
   @ApiOperation({ summary: 'Reject withdrawal' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: WithdrawalResponseDto })
-  rejectWithdrawal(@Param('id') id: string) {
-    return this.withdrawalsService.rejectWithdrawal(id);
+  rejectWithdrawal(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.withdrawalsService.rejectWithdrawal(tenantId, id);
   }
 
   @Post(':id/complete')
@@ -113,15 +152,21 @@ export class WithdrawalsController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, description: 'Completion details' })
-  completeWithdrawal(@Param('id') id: string) {
-    return this.withdrawalsService.completeWithdrawal(id);
+  completeWithdrawal(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.withdrawalsService.completeWithdrawal(tenantId, id);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get withdrawal details' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: WithdrawalResponseDto })
-  getWithdrawalDetail(@Param('id') id: string) {
-    return this.withdrawalsService.getWithdrawalDetail(id);
+  getWithdrawalDetail(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.withdrawalsService.getWithdrawalDetail(tenantId, id);
   }
 }

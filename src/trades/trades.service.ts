@@ -10,17 +10,20 @@ import { ReceiptStatus, TradeStatus } from '@prisma/client';
 export class TradesService {
   constructor(private prisma: PrismaService) {}
 
-  async getTrades(filters: {
-    status?: string;
-    page?: string;
-    limit?: string;
-    search?: string;
-  }) {
+  async getTrades(
+    tenantId: string,
+    filters: {
+      status?: string;
+      page?: string;
+      limit?: string;
+      search?: string;
+    },
+  ) {
     const page = parseInt(filters.page || '1', 10);
     const limit = parseInt(filters.limit || '10', 10);
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: any = { tenantId };
 
     if (filters.status) {
       where.status = filters.status as TradeStatus;
@@ -29,10 +32,22 @@ export class TradesService {
     if (filters.search) {
       where.OR = [
         { reference: { contains: filters.search, mode: 'insensitive' } },
-        { receipt: { receiptNumber: { contains: filters.search, mode: 'insensitive' } } },
-        { receipt: { commodity: { name: { contains: filters.search, mode: 'insensitive' } } } },
-        { seller: { firstName: { contains: filters.search, mode: 'insensitive' } } },
-        { seller: { lastName: { contains: filters.search, mode: 'insensitive' } } },
+        {
+          receipt: {
+            receiptNumber: { contains: filters.search, mode: 'insensitive' },
+          },
+        },
+        {
+          receipt: {
+            commodity: { name: { contains: filters.search, mode: 'insensitive' } },
+          },
+        },
+        {
+          seller: { firstName: { contains: filters.search, mode: 'insensitive' } },
+        },
+        {
+          seller: { lastName: { contains: filters.search, mode: 'insensitive' } },
+        },
       ];
     }
 
@@ -75,12 +90,13 @@ export class TradesService {
   }
 
   async createTrade(
+    tenantId: string,
     dto: { receiptId: string; pricePerUnit: number },
-    sellerId?: string,
+    sellerId: string,
   ) {
     return this.prisma.$transaction(async (tx) => {
-      const receipt = await tx.receipt.findUnique({
-        where: { id: dto.receiptId },
+      const receipt = await tx.receipt.findFirst({
+        where: { id: dto.receiptId, tenantId },
       });
       if (!receipt) throw new NotFoundException('Receipt not found');
       if (receipt.status !== ReceiptStatus.ACTIVE) {
@@ -96,13 +112,6 @@ export class TradesService {
           'Price per unit must be greater than zero',
         );
       }
-
-      const seller = sellerId
-        ? { id: sellerId }
-        : await tx.user.findFirst({
-            where: { email: 'demo@securestore.com' },
-          });
-      if (!seller) throw new NotFoundException('Seller not found');
 
       const quantity = receipt.quantityAvailable;
       const totalPrice = quantity * dto.pricePerUnit;
@@ -120,7 +129,8 @@ export class TradesService {
         data: {
           reference: `T-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           receiptId: receipt.id,
-          sellerId: seller.id,
+          sellerId: sellerId,
+          tenantId: tenantId,
           quantity,
           pricePerUnit: dto.pricePerUnit,
           totalPrice,
@@ -140,10 +150,10 @@ export class TradesService {
     });
   }
 
-  async settleTrade(tradeId: string, buyerId: string) {
+  async settleTrade(tenantId: string, tradeId: string, buyerId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const trade = await tx.trade.findUnique({
-        where: { id: tradeId },
+      const trade = await tx.trade.findFirst({
+        where: { id: tradeId, tenantId },
         include: { receipt: true },
       });
       if (!trade) throw new NotFoundException('Trade not found');
@@ -156,7 +166,9 @@ export class TradesService {
         throw new BadRequestException('Buyer and seller cannot be the same');
       }
 
-      const buyer = await tx.user.findUnique({ where: { id: buyerId } });
+      const buyer = await tx.user.findFirst({
+        where: { id: buyerId, tenantId },
+      });
       if (!buyer) throw new NotFoundException('Buyer not found');
 
       // Transfer ownership and reactivate the receipt
@@ -188,10 +200,10 @@ export class TradesService {
     });
   }
 
-  async cancelTrade(tradeId: string) {
+  async cancelTrade(tenantId: string, tradeId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const trade = await tx.trade.findUnique({
-        where: { id: tradeId },
+      const trade = await tx.trade.findFirst({
+        where: { id: tradeId, tenantId },
         include: { receipt: true },
       });
       if (!trade) throw new NotFoundException('Trade not found');
@@ -218,9 +230,10 @@ export class TradesService {
       return { id: updated.id, status: updated.status };
     });
   }
-  async getTradeDetail(id: string) {
-    const trade = await this.prisma.trade.findUnique({
-      where: { id },
+
+  async getTradeDetail(tenantId: string, id: string) {
+    const trade = await this.prisma.trade.findFirst({
+      where: { id, tenantId },
       include: {
         receipt: {
           include: { commodity: true, warehouse: true },

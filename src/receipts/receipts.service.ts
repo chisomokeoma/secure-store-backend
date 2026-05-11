@@ -1,22 +1,25 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReceiptStatus, WithdrawalStatus } from '@prisma/client';
+import { ReceiptStatus } from '@prisma/client';
 
 @Injectable()
 export class ReceiptsService {
   constructor(private prisma: PrismaService) {}
 
-  async getReceipts(filters: {
-    status?: string;
-    page?: string;
-    limit?: string;
-    search?: string;
-  }) {
+  async getReceipts(
+    tenantId: string,
+    filters: {
+      status?: string;
+      page?: string;
+      limit?: string;
+      search?: string;
+    },
+  ) {
     const page = parseInt(filters.page || '1', 10);
     const limit = parseInt(filters.limit || '10', 10);
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: any = { tenantId };
 
     // 1. Status Filter
     if (filters?.status) {
@@ -27,7 +30,9 @@ export class ReceiptsService {
     if (filters.search) {
       where.OR = [
         { receiptNumber: { contains: filters.search, mode: 'insensitive' } },
-        { commodity: { name: { contains: filters.search, mode: 'insensitive' } } },
+        {
+          commodity: { name: { contains: filters.search, mode: 'insensitive' } },
+        },
       ];
     }
 
@@ -64,13 +69,19 @@ export class ReceiptsService {
     };
   }
 
-  async getReceiptStats() {
+  async getReceiptStats(tenantId: string) {
     const [totalIssued, totalActive, totalPledged, totalWithdrawn] =
       await Promise.all([
-        this.prisma.receipt.count(),
-        this.prisma.receipt.count({ where: { status: ReceiptStatus.ACTIVE } }),
-        this.prisma.receipt.count({ where: { status: ReceiptStatus.PLEDGED } }),
-        this.prisma.receipt.count({ where: { status: ReceiptStatus.WITHDRAWN } }),
+        this.prisma.receipt.count({ where: { tenantId } }),
+        this.prisma.receipt.count({
+          where: { tenantId, status: ReceiptStatus.ACTIVE },
+        }),
+        this.prisma.receipt.count({
+          where: { tenantId, status: ReceiptStatus.PLEDGED },
+        }),
+        this.prisma.receipt.count({
+          where: { tenantId, status: ReceiptStatus.WITHDRAWN },
+        }),
       ]);
 
     return {
@@ -81,9 +92,9 @@ export class ReceiptsService {
     };
   }
 
-  async getReceiptDetail(id: string) {
-    const r = await this.prisma.receipt.findUnique({
-      where: { id },
+  async getReceiptDetail(tenantId: string, id: string) {
+    const r = await this.prisma.receipt.findFirst({
+      where: { id, tenantId },
       include: {
         commodity: true,
         warehouse: true,

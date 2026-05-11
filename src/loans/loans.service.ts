@@ -11,8 +11,9 @@ import { CalculateLoanDto, CreateLoanDto } from './dto/loans.dto';
 export class LoansService {
   constructor(private prisma: PrismaService) {}
 
-  async getFinanciers() {
+  async getFinanciers(tenantId: string) {
     return this.prisma.financier.findMany({
+      where: { tenantId },
       select: {
         id: true,
         name: true,
@@ -24,16 +25,15 @@ export class LoansService {
     });
   }
 
-  async getPledgeableReceipts(clientId?: string, commodity?: string) {
-    const user = clientId
-      ? { id: clientId }
-      : await this.prisma.user.findFirst({
-          where: { email: 'demo@securestore.com' },
-        });
-
+  async getPledgeableReceipts(
+    tenantId: string,
+    clientId: string,
+    commodity?: string,
+  ) {
     const receipts = await this.prisma.receipt.findMany({
       where: {
-        clientId: user?.id,
+        tenantId,
+        clientId: clientId,
         status: ReceiptStatus.ACTIVE,
         quantityAvailable: { gt: 0 },
       },
@@ -54,9 +54,9 @@ export class LoansService {
       }));
   }
 
-  async calculateLoan(dto: CalculateLoanDto) {
-    const financier = await this.prisma.financier.findUnique({
-      where: { id: dto.financierId },
+  async calculateLoan(tenantId: string, dto: CalculateLoanDto) {
+    const financier = await this.prisma.financier.findFirst({
+      where: { id: dto.financierId, tenantId },
     });
     if (!financier) throw new NotFoundException('Financier not found');
     if (dto.amount <= 0) {
@@ -75,10 +75,10 @@ export class LoansService {
     };
   }
 
-  async createLoan(dto: CreateLoanDto, clientId?: string) {
+  async createLoan(tenantId: string, dto: CreateLoanDto, clientId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const receipt = await tx.receipt.findUnique({
-        where: { id: dto.receiptId },
+      const receipt = await tx.receipt.findFirst({
+        where: { id: dto.receiptId, tenantId },
       });
       if (!receipt) throw new NotFoundException('Receipt not found');
       if (receipt.status !== ReceiptStatus.ACTIVE) {
@@ -90,17 +90,10 @@ export class LoansService {
         throw new BadRequestException('Receipt has no available quantity');
       }
 
-      const financier = await tx.financier.findUnique({
-        where: { id: dto.financierId },
+      const financier = await tx.financier.findFirst({
+        where: { id: dto.financierId, tenantId },
       });
       if (!financier) throw new NotFoundException('Financier not found');
-
-      const user = clientId
-        ? { id: clientId }
-        : await tx.user.findFirst({
-            where: { email: 'demo@securestore.com' },
-          });
-      if (!user) throw new NotFoundException('Client not found');
 
       const tenureMonths = financier.maxTenure;
       const totalInterest = (dto.amount * financier.interestRate) / 100;
@@ -119,7 +112,8 @@ export class LoansService {
         data: {
           reference: `L-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           receiptId: receipt.id,
-          clientId: user.id,
+          clientId: clientId,
+          tenantId: tenantId,
           financierId: financier.id,
           amount: dto.amount,
           interestRate: financier.interestRate,
@@ -144,9 +138,11 @@ export class LoansService {
     });
   }
 
-  async approveLoan(loanId: string) {
+  async approveLoan(tenantId: string, loanId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const loan = await tx.loan.findUnique({ where: { id: loanId } });
+      const loan = await tx.loan.findFirst({
+        where: { id: loanId, tenantId },
+      });
       if (!loan) throw new NotFoundException('Loan not found');
       if (loan.status !== LoanStatus.PENDING) {
         throw new BadRequestException(
@@ -163,9 +159,11 @@ export class LoansService {
     });
   }
 
-  async rejectLoan(loanId: string) {
+  async rejectLoan(tenantId: string, loanId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const loan = await tx.loan.findUnique({ where: { id: loanId } });
+      const loan = await tx.loan.findFirst({
+        where: { id: loanId, tenantId },
+      });
       if (!loan) throw new NotFoundException('Loan not found');
       if (loan.status !== LoanStatus.PENDING) {
         throw new BadRequestException(
@@ -178,9 +176,10 @@ export class LoansService {
         where: { id: loan.receiptId },
         data: {
           status: ReceiptStatus.ACTIVE,
-          quantityAvailable: { set: 0 }, // will be reset below
+          quantityAvailable: { set: 0 },
         },
       });
+
       const receipt = await tx.receipt.findUnique({
         where: { id: loan.receiptId },
       });
@@ -200,10 +199,10 @@ export class LoansService {
     });
   }
 
-  async repayLoan(loanId: string) {
+  async repayLoan(tenantId: string, loanId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const loan = await tx.loan.findUnique({
-        where: { id: loanId },
+      const loan = await tx.loan.findFirst({
+        where: { id: loanId, tenantId },
         include: { receipt: true },
       });
       if (!loan) throw new NotFoundException('Loan not found');
@@ -234,9 +233,10 @@ export class LoansService {
       };
     });
   }
-  async getLoanDetail(id: string) {
-    const loan = await this.prisma.loan.findUnique({
-      where: { id },
+
+  async getLoanDetail(tenantId: string, id: string) {
+    const loan = await this.prisma.loan.findFirst({
+      where: { id, tenantId },
       include: {
         receipt: {
           include: { commodity: true, warehouse: true },

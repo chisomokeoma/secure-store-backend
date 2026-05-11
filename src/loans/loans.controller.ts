@@ -7,6 +7,7 @@ import {
   Body,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -14,6 +15,7 @@ import {
   ApiResponse,
   ApiQuery,
   ApiParam,
+  ApiBearerAuth,
 } from '@nestjs/swagger';
 import { LoansService } from './loans.service';
 import {
@@ -24,8 +26,12 @@ import {
   LoanCalculationResponseDto,
   LoanResponseDto,
 } from './dto/loans.dto';
+import { JwtAuthGuard } from '../auth/jwt.guard';
+import { CurrentUser } from '../common/decorators/user.decorator';
 
 @ApiTags('Loans')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 @Controller('loans')
 export class LoansController {
   constructor(private readonly loansService: LoansService) {}
@@ -33,24 +39,31 @@ export class LoansController {
   @Get('financiers')
   @ApiOperation({ summary: 'Get list of available financiers' })
   @ApiResponse({ status: 200, type: [FinancierDto] })
-  getFinanciers() {
-    return this.loansService.getFinanciers();
+  getFinanciers(@CurrentUser('tenantId') tenantId: string) {
+    return this.loansService.getFinanciers(tenantId);
   }
 
   @Get('pledgeable-receipts')
   @ApiOperation({ summary: 'Get receipts available to be pledged for a loan' })
   @ApiQuery({ name: 'commodity', required: false })
   @ApiResponse({ status: 200, type: [PledgeableReceiptDto] })
-  getPledgeableReceipts(@Query('commodity') commodity?: string) {
-    return this.loansService.getPledgeableReceipts(undefined, commodity);
+  getPledgeableReceipts(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Query('commodity') commodity?: string,
+  ) {
+    return this.loansService.getPledgeableReceipts(tenantId, userId, commodity);
   }
 
   @Post('calculate')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Calculate loan terms' })
   @ApiResponse({ status: 200, type: LoanCalculationResponseDto })
-  calculateLoan(@Body() body: CalculateLoanDto) {
-    return this.loansService.calculateLoan(body);
+  calculateLoan(
+    @CurrentUser('tenantId') tenantId: string,
+    @Body() body: CalculateLoanDto,
+  ) {
+    return this.loansService.calculateLoan(tenantId, body);
   }
 
   @Post()
@@ -58,8 +71,12 @@ export class LoansController {
     summary: 'Create a new loan application — pledges the collateral receipt',
   })
   @ApiResponse({ status: 201, type: LoanResponseDto })
-  createLoan(@Body() body: CreateLoanDto) {
-    return this.loansService.createLoan(body);
+  createLoan(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Body() body: CreateLoanDto,
+  ) {
+    return this.loansService.createLoan(tenantId, body, userId);
   }
 
   @Post(':id/approve')
@@ -67,8 +84,11 @@ export class LoansController {
   @ApiOperation({ summary: 'Approve loan — moves PENDING → ACTIVE' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: LoanResponseDto })
-  approveLoan(@Param('id') id: string) {
-    return this.loansService.approveLoan(id);
+  approveLoan(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.loansService.approveLoan(tenantId, id);
   }
 
   @Post(':id/reject')
@@ -78,8 +98,11 @@ export class LoansController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: LoanResponseDto })
-  rejectLoan(@Param('id') id: string) {
-    return this.loansService.rejectLoan(id);
+  rejectLoan(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.loansService.rejectLoan(tenantId, id);
   }
 
   @Post(':id/repay')
@@ -89,15 +112,21 @@ export class LoansController {
   })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: LoanResponseDto })
-  repayLoan(@Param('id') id: string) {
-    return this.loansService.repayLoan(id);
+  repayLoan(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.loansService.repayLoan(tenantId, id);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get details of a specific loan' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: LoanResponseDto })
-  getLoanDetail(@Param('id') id: string) {
-    return this.loansService.getLoanDetail(id);
+  getLoanDetail(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.loansService.getLoanDetail(tenantId, id);
   }
 }

@@ -14,17 +14,20 @@ import {
 export class WithdrawalsService {
   constructor(private prisma: PrismaService) {}
 
-  async getWithdrawals(filters: {
-    status?: string;
-    page?: string;
-    limit?: string;
-    search?: string;
-  }) {
+  async getWithdrawals(
+    tenantId: string,
+    filters: {
+      status?: string;
+      page?: string;
+      limit?: string;
+      search?: string;
+    },
+  ) {
     const page = parseInt(filters.page || '1', 10);
     const limit = parseInt(filters.limit || '10', 10);
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: any = { tenantId };
 
     if (filters.status) {
       where.status = filters.status as WithdrawalStatus;
@@ -33,8 +36,16 @@ export class WithdrawalsService {
     if (filters.search) {
       where.OR = [
         { reference: { contains: filters.search, mode: 'insensitive' } },
-        { receipt: { receiptNumber: { contains: filters.search, mode: 'insensitive' } } },
-        { receipt: { commodity: { name: { contains: filters.search, mode: 'insensitive' } } } },
+        {
+          receipt: {
+            receiptNumber: { contains: filters.search, mode: 'insensitive' },
+          },
+        },
+        {
+          receipt: {
+            commodity: { name: { contains: filters.search, mode: 'insensitive' } },
+          },
+        },
       ];
     }
 
@@ -74,16 +85,11 @@ export class WithdrawalsService {
     };
   }
 
-  async getEligibleReceipts(clientId?: string) {
-    const user = clientId
-      ? { id: clientId }
-      : await this.prisma.user.findFirst({
-          where: { email: 'demo@securestore.com' },
-        });
-
+  async getEligibleReceipts(tenantId: string, clientId: string) {
     const receipts = await this.prisma.receipt.findMany({
       where: {
-        clientId: user?.id,
+        tenantId,
+        clientId: clientId,
         status: ReceiptStatus.ACTIVE,
         quantityAvailable: { gt: 0 },
       },
@@ -100,9 +106,9 @@ export class WithdrawalsService {
     }));
   }
 
-  async getReceiptPrefill(receiptId: string) {
-    const r = await this.prisma.receipt.findUnique({
-      where: { id: receiptId },
+  async getReceiptPrefill(tenantId: string, receiptId: string) {
+    const r = await this.prisma.receipt.findFirst({
+      where: { id: receiptId, tenantId },
       include: { warehouse: true, commodity: true },
     });
     if (!r) throw new NotFoundException('Receipt not found');
@@ -130,8 +136,8 @@ export class WithdrawalsService {
     };
   }
 
-  async calculateWithdrawal(dto: CalculateWithdrawalDto) {
-    const prefill = await this.getReceiptPrefill(dto.receiptId);
+  async calculateWithdrawal(tenantId: string, dto: CalculateWithdrawalDto) {
+    const prefill = await this.getReceiptPrefill(tenantId, dto.receiptId);
     if (dto.quantity <= 0) {
       throw new BadRequestException('Quantity must be greater than zero');
     }
@@ -156,11 +162,15 @@ export class WithdrawalsService {
     };
   }
 
-  async createWithdrawalRequest(dto: CreateWithdrawalDto, clientId?: string) {
+  async createWithdrawalRequest(
+    tenantId: string,
+    dto: CreateWithdrawalDto,
+    clientId: string,
+  ) {
     return this.prisma.$transaction(async (tx) => {
       // Re-fetch inside the transaction to prevent races
-      const receipt = await tx.receipt.findUnique({
-        where: { id: dto.receiptId },
+      const receipt = await tx.receipt.findFirst({
+        where: { id: dto.receiptId, tenantId },
       });
       if (!receipt) throw new NotFoundException('Receipt not found');
       if (receipt.status !== ReceiptStatus.ACTIVE) {
@@ -176,14 +186,6 @@ export class WithdrawalsService {
           'Requested quantity exceeds available quantity',
         );
       }
-
-      // Resolve client
-      const user = clientId
-        ? { id: clientId }
-        : await tx.user.findFirst({
-            where: { email: 'demo@securestore.com' },
-          });
-      if (!user) throw new NotFoundException('Client not found');
 
       // Compute fees inside the tx (don't trust the prefill from earlier reads)
       const wc = await tx.warehouseCommodity.findUnique({
@@ -203,7 +205,8 @@ export class WithdrawalsService {
         data: {
           reference: `W-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           receiptId: receipt.id,
-          clientId: user.id,
+          clientId: clientId,
+          tenantId: tenantId,
           quantity: dto.quantity,
           reason: dto.reason,
           plannedDate: new Date(dto.plannedDate),
@@ -226,9 +229,11 @@ export class WithdrawalsService {
     });
   }
 
-  async confirmPayment(withdrawalId: string) {
+  async confirmPayment(tenantId: string, withdrawalId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const w = await tx.withdrawal.findUnique({ where: { id: withdrawalId } });
+      const w = await tx.withdrawal.findFirst({
+        where: { id: withdrawalId, tenantId },
+      });
       if (!w) throw new NotFoundException('Withdrawal not found');
       if (w.status !== WithdrawalStatus.PENDING_PAYMENT) {
         throw new BadRequestException(
@@ -250,9 +255,11 @@ export class WithdrawalsService {
     });
   }
 
-  async approveWithdrawal(withdrawalId: string) {
+  async approveWithdrawal(tenantId: string, withdrawalId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const w = await tx.withdrawal.findUnique({ where: { id: withdrawalId } });
+      const w = await tx.withdrawal.findFirst({
+        where: { id: withdrawalId, tenantId },
+      });
       if (!w) throw new NotFoundException('Withdrawal not found');
       if (w.status !== WithdrawalStatus.PAID_PENDING_APPROVAL) {
         throw new BadRequestException(
@@ -269,9 +276,11 @@ export class WithdrawalsService {
     });
   }
 
-  async rejectWithdrawal(withdrawalId: string) {
+  async rejectWithdrawal(tenantId: string, withdrawalId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const w = await tx.withdrawal.findUnique({ where: { id: withdrawalId } });
+      const w = await tx.withdrawal.findFirst({
+        where: { id: withdrawalId, tenantId },
+      });
       if (!w) throw new NotFoundException('Withdrawal not found');
       if (
         w.status === WithdrawalStatus.COMPLETED ||
@@ -291,12 +300,10 @@ export class WithdrawalsService {
     });
   }
 
-  // The big one — option (b): cancel parent receipt, issue child receipt
-  // for the remainder, decrement nothing (parent goes to 0 on cancel).
-  async completeWithdrawal(withdrawalId: string) {
+  async completeWithdrawal(tenantId: string, withdrawalId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const w = await tx.withdrawal.findUnique({
-        where: { id: withdrawalId },
+      const w = await tx.withdrawal.findFirst({
+        where: { id: withdrawalId, tenantId },
         include: { receipt: true },
       });
       if (!w) throw new NotFoundException('Withdrawal not found');
@@ -330,8 +337,7 @@ export class WithdrawalsService {
       });
 
       // If there's remaining stock, issue a new child receipt for it
-      let childReceipt: Awaited<ReturnType<typeof tx.receipt.create>> | null =
-        null;
+      let childReceipt: any = null;
       if (remainder > 0) {
         const childNumber = await this.generateChildReceiptNumber(
           tx,
@@ -344,6 +350,7 @@ export class WithdrawalsService {
             commodityId: parent.commodityId,
             warehouseId: parent.warehouseId,
             clientId: parent.clientId,
+            tenantId: tenantId,
             parentReceiptId: parent.id,
             quantity: remainder,
             quantityAvailable: remainder,
@@ -378,8 +385,6 @@ export class WithdrawalsService {
     });
   }
 
-  // Generates child receipt numbers like WR-2025-0001-A, then -B, -C, ...
-  // If parent already has a suffix (it's itself a child), strips it first.
   private async generateChildReceiptNumber(
     tx: any,
     parentNumber: string,
@@ -402,12 +407,10 @@ export class WithdrawalsService {
     if (existing.length === 0) return 'A';
     const sorted = [...existing].sort();
     const last = sorted[sorted.length - 1];
-    // Single-letter increment up to Z, then AA, AB, ...
     if (last === 'Z') return 'AA';
     if (last.length === 1) {
       return String.fromCharCode(last.charCodeAt(0) + 1);
     }
-    // Multi-letter: increment last char, carry if needed (rare)
     const chars = last.split('');
     for (let i = chars.length - 1; i >= 0; i--) {
       if (chars[i] !== 'Z') {
@@ -418,9 +421,10 @@ export class WithdrawalsService {
     }
     return 'A' + chars.join('');
   }
-  async getWithdrawalDetail(id: string) {
-    const w = await this.prisma.withdrawal.findUnique({
-      where: { id },
+
+  async getWithdrawalDetail(tenantId: string, id: string) {
+    const w = await this.prisma.withdrawal.findFirst({
+      where: { id, tenantId },
       include: {
         receipt: {
           include: { commodity: true, warehouse: true },

@@ -1,9 +1,20 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiQuery,
+  ApiParam,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { CommoditiesService } from './commodities.service';
 import { CommodityOverviewDto } from './dto/commodities.dto';
+import { JwtAuthGuard } from '../auth/jwt.guard';
+import { CurrentUser } from '../common/decorators/user.decorator';
 
 @ApiTags('Commodities')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 @Controller('commodities')
 export class CommoditiesController {
   constructor(private readonly commoditiesService: CommoditiesService) {}
@@ -11,16 +22,23 @@ export class CommoditiesController {
   @Get('mine')
   @ApiOperation({ summary: 'Get commodities owned by current user' })
   @ApiResponse({ status: 200, type: [CommodityOverviewDto] })
-  getMyCommodities() {
-    return this.commoditiesService.getMyCommodities();
+  getMyCommodities(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.commoditiesService.getMyCommodities(tenantId, userId);
   }
 
   @Get(':id/overview')
   @ApiOperation({ summary: 'Get overview metrics for a specific commodity' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: CommodityOverviewDto })
-  getCommodityOverview(@Param('id') id: string) {
-    return this.commoditiesService.getCommodityOverview(id);
+  getCommodityOverview(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+  ) {
+    return this.commoditiesService.getCommodityOverview(tenantId, id, userId);
   }
 
   @Get(':id/receipts')
@@ -30,8 +48,14 @@ export class CommoditiesController {
   @ApiQuery({ name: 'page', required: false })
   @ApiQuery({ name: 'search', required: false })
   @ApiResponse({ status: 200, description: 'Paginated list of receipts' })
-  getCommodityReceipts(@Param('id') id: string, @Query('view') view?: string, @Query('page') page?: string, @Query('search') search?: string) {
-    return this.commoditiesService.getCommodityReceipts(id);
+  getCommodityReceipts(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Query('view') view?: string,
+    @Query('page') page?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.commoditiesService.getCommodityReceipts(tenantId, id);
   }
 
   @Get(':id/export')
@@ -39,7 +63,10 @@ export class CommoditiesController {
   @ApiParam({ name: 'id' })
   @ApiQuery({ name: 'format', required: false })
   @ApiResponse({ status: 200, description: 'Exported file buffer' })
-  exportCommodityData(@Param('id') id: string, @Query('format') format?: string) {
+  exportCommodityData(
+    @Param('id') id: string,
+    @Query('format') format?: string,
+  ) {
     return 'Export Stub';
   }
 }

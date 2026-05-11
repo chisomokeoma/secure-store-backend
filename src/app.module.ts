@@ -18,9 +18,29 @@ import { TradesModule } from './trades/trades.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { ReportsModule } from './reports/reports.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule, WarehousesModule, CommoditiesModule, ReceiptsModule, FinanciersModule, AuthModule, RolesModule, TenantsModule, WarehouseReceiptsModule, TransactionsModule, WithdrawalsModule, LoansModule, TradesModule, NotificationsModule, DashboardModule, ReportsModule],
+  imports: [
+    PrismaModule,
+    UsersModule,
+    WarehousesModule,
+    CommoditiesModule,
+    ReceiptsModule,
+    FinanciersModule,
+    AuthModule,
+    RolesModule,
+    TenantsModule,
+    WarehouseReceiptsModule,
+    TransactionsModule,
+    WithdrawalsModule,
+    LoansModule,
+    TradesModule,
+    NotificationsModule,
+    DashboardModule,
+    ReportsModule,
+    AdminModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

@@ -14,7 +14,11 @@ export class AuthService {
     // 1. Find user by email — include roles
     const user = await this.prisma.user.findUnique({
       where: { email },
-      include: { roles: true },
+      include: {
+        roles: {
+          include: { role: true },
+        },
+      },
     });
     if (!user) throw new BadRequestException('Invalid email or password');
 
@@ -23,14 +27,18 @@ export class AuthService {
     if (!isMatch) throw new BadRequestException('Invalid email or password');
 
     // 3. Extract role names
-    const roles = user.roles.map((r) => r.name);
+    const roles = user.roles.map((ur) => ur.role.name);
 
-    // 4. Generate JWT token
-    const token = this.jwt.sign({
-      sub: user.id,
-      email: user.email,
-      roles: roles,
-    });
+    // 4. Generate JWT token (Access Token)
+    const token = this.jwt.sign(
+      {
+        sub: user.id,
+        email: user.email,
+        roles: roles,
+        tenantId: user.tenantId,
+      },
+      { expiresIn: '24h' },
+    );
 
     return {
       access_token: token,
@@ -38,6 +46,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         roles: roles,
+        tenantId: user.tenantId,
       },
     };
   }
