@@ -43,7 +43,9 @@ export class WithdrawalsService {
         },
         {
           receipt: {
-            commodity: { name: { contains: filters.search, mode: 'insensitive' } },
+            commodity: {
+              name: { contains: filters.search, mode: 'insensitive' },
+            },
           },
         },
       ];

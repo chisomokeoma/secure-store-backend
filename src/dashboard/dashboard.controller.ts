@@ -29,7 +29,9 @@ export class DashboardController {
   // -- General Dashboard Endpoints (accessible to all authenticated users) --
 
   @Get('summary')
-  @ApiOperation({ summary: 'Get high-level dashboard metrics' })
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
+  @UseGuards(RolesGuard)
+  @ApiOperation({ summary: 'Get high-level dashboard metrics (Tenant Admin)' })
   @ApiResponse({ status: 200, type: DashboardSummaryDto })
   getSummary(@CurrentUser('tenantId') tenantId: string) {
     return this.dashboardService.getSummary(tenantId);
@@ -65,7 +67,9 @@ export class DashboardController {
   @Get('clients/:id/summary')
   @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @UseGuards(RolesGuard)
-  @ApiOperation({ summary: 'Get detailed summary for a specific client (Admin only)' })
+  @ApiOperation({
+    summary: 'Get detailed summary for a specific client (Admin only)',
+  })
   @ApiParam({ name: 'id' })
   getClientDrilldown(
     @CurrentUser('tenantId') tenantId: string,
@@ -77,7 +81,9 @@ export class DashboardController {
   @Get('commodities/:id/summary')
   @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @UseGuards(RolesGuard)
-  @ApiOperation({ summary: 'Get detailed summary for a specific commodity (Admin only)' })
+  @ApiOperation({
+    summary: 'Get detailed summary for a specific commodity (Admin only)',
+  })
   @ApiParam({ name: 'id' })
   getCommodityDrilldown(
     @CurrentUser('tenantId') tenantId: string,

@@ -1,5 +1,20 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiBody, ApiParam } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Body,
+  Param,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiBody,
+  ApiParam,
+} from '@nestjs/swagger';
 import { GradingService } from './grading.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -31,15 +46,24 @@ export class GradingController {
       properties: {
         name: { type: 'string', example: 'Maize' },
         code: { type: 'string', example: 'MAIZE-001' },
-        unitOfMeasure: { type: 'string', enum: ['METRIC_TON', 'KILOGRAM', 'BAG', 'LITRE', 'UNIT', 'METER'] },
-        gradingLogic: { type: 'string', enum: ['PERCENTAGE', 'SCORE', 'PASS_FAIL'] },
+        unitOfMeasure: {
+          type: 'string',
+          enum: ['METRIC_TON', 'KILOGRAM', 'BAG', 'LITRE', 'UNIT', 'METER'],
+        },
+        gradingLogic: {
+          type: 'string',
+          enum: ['PERCENTAGE', 'SCORE', 'PASS_FAIL'],
+        },
         numberOfGrades: { type: 'integer', example: 3 },
         standardBagWeightKg: { type: 'number', example: 50 },
         description: { type: 'string' },
       },
     },
   })
-  createCommodity(@CurrentUser('tenantId') tenantId: string, @Body() body: any) {
+  createCommodity(
+    @CurrentUser('tenantId') tenantId: string,
+    @Body() body: any,
+  ) {
     return this.gradingService.createCommodity(tenantId, body);
   }
 
@@ -59,7 +83,10 @@ export class GradingController {
   @Get('commodities/:id/parameters')
   @ApiOperation({ summary: 'Get grading parameters for a commodity' })
   @ApiParam({ name: 'id' })
-  getParameters(@CurrentUser('tenantId') tenantId: string, @Param('id') id: string) {
+  getParameters(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
     return this.gradingService.getParameters(tenantId, id);
   }
 
@@ -103,7 +130,10 @@ export class GradingController {
   @Delete('parameters/:id')
   @ApiOperation({ summary: 'Delete a grading parameter' })
   @ApiParam({ name: 'id' })
-  deleteParameter(@CurrentUser('tenantId') tenantId: string, @Param('id') id: string) {
+  deleteParameter(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
     return this.gradingService.deleteParameter(tenantId, id);
   }
 
@@ -117,7 +147,11 @@ export class GradingController {
       required: ['commodityId'],
       properties: {
         commodityId: { type: 'string' },
-        warehouseIds: { type: 'array', items: { type: 'string' }, description: 'Omit to apply to ALL warehouses' },
+        warehouseIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Omit to apply to ALL warehouses',
+        },
       },
     },
   })
@@ -126,13 +160,18 @@ export class GradingController {
     @Body('commodityId') commodityId: string,
     @Body('warehouseIds') warehouseIds?: string[],
   ) {
-    return this.gradingService.applyToWarehouses(tenantId, commodityId, warehouseIds);
+    return this.gradingService.applyToWarehouses(
+      tenantId,
+      commodityId,
+      warehouseIds,
+    );
   }
 
   @Post('score')
   @ApiOperation({
     summary: 'Preview computed grade for a sample (no data saved)',
-    description: 'Runs the grading scorer algorithm and returns the computed grade.',
+    description:
+      'Runs the grading scorer algorithm and returns the computed grade.',
   })
   @ApiBody({
     schema: {
@@ -142,7 +181,11 @@ export class GradingController {
         commodityId: { type: 'string' },
         measurements: {
           type: 'object',
-          example: { 'Foreign Matter': 0.3, Moisture: 12.5, 'Broken Kernels': 1.5 },
+          example: {
+            'Foreign Matter': 0.3,
+            Moisture: 12.5,
+            'Broken Kernels': 1.5,
+          },
         },
       },
     },
@@ -152,6 +195,10 @@ export class GradingController {
     @Body('commodityId') commodityId: string,
     @Body('measurements') measurements: Record<string, number>,
   ) {
-    return this.gradingService.scorePreview(tenantId, commodityId, measurements);
+    return this.gradingService.scorePreview(
+      tenantId,
+      commodityId,
+      measurements,
+    );
   }
 }

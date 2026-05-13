@@ -1,7 +1,10 @@
 import { Controller, Get, Patch, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { NotificationsService } from './notifications.service';
-import { NotificationDto, NotificationResponseDto } from './dto/notifications.dto';
+import {
+  NotificationDto,
+  NotificationResponseDto,
+} from './dto/notifications.dto';
 
 @ApiTags('Notifications')
 @Controller('notifications')

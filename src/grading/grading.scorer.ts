@@ -37,7 +37,10 @@ export type ScoreResult = {
  */
 export function scoreSample(input: ScoreInput): ScoreResult {
   const { parameters, measurements, numberOfGrades } = input;
-  const gradeLabels = Array.from({ length: numberOfGrades }, (_, i) => `Grade ${i + 1}`);
+  const gradeLabels = Array.from(
+    { length: numberOfGrades },
+    (_, i) => `Grade ${i + 1}`,
+  );
 
   // Validate all required measurements are present
   const missing = parameters
@@ -105,10 +108,17 @@ export function scoreSample(input: ScoreInput): ScoreResult {
     .reduce((sum, p) => sum + measurements[p.name], 0);
 
   // Standard deduction from "Standard Deduction" parameter if present
-  const stdDeductionParam = parameters.find((p) => p.name === 'Standard Deduction');
+  const stdDeductionParam = parameters.find(
+    (p) => p.name === 'Standard Deduction',
+  );
   const standardDeductionPct = stdDeductionParam
-    ? stdDeductionParam.thresholds[computedGrade] ?? 0
+    ? (stdDeductionParam.thresholds[computedGrade] ?? 0)
     : 0;
 
-  return { computedGrade, totalDefectivePct, standardDeductionPct, perParameter };
+  return {
+    computedGrade,
+    totalDefectivePct,
+    standardDeductionPct,
+    perParameter,
+  };
 }

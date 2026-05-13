@@ -1,6 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReceiptStatus, WithdrawalStatus, LoanStatus, TradeStatus } from '@prisma/client';
+import {
+  ReceiptStatus,
+  WithdrawalStatus,
+  LoanStatus,
+  TradeStatus,
+} from '@prisma/client';
 import { ActivityType, RecentActivityDto } from './dto/dashboard.dto';
 
 @Injectable()
@@ -8,29 +13,71 @@ export class DashboardService {
   constructor(private prisma: PrismaService) {}
 
   async getSummary(tenantId: string) {
-    const [warehouses, clients, commodityResult, pendingRequests] =
-      await Promise.all([
-        this.prisma.warehouse.count({ where: { tenantId } }),
-        this.prisma.user.count({
-          where: {
-            tenantId,
-            roles: { some: { role: { name: 'CLIENT' } } },
-          },
-        }),
-        this.prisma.receipt.aggregate({
-          where: { tenantId, status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] } },
-          _sum: { quantityAvailable: true },
-        }),
-        this.prisma.withdrawal.count({
-          where: { tenantId, status: WithdrawalStatus.PAID_PENDING_APPROVAL },
-        }),
-      ]);
+    const twoMonthsAgo = new Date();
+    twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+
+    const [
+      warehouses,
+      warehousesDelta,
+      clients,
+      clientsDelta,
+      commodityResult,
+      commodityDeltaResult,
+      pendingRequests,
+      pendingRequestsDelta,
+    ] = await Promise.all([
+      // --- Totals ---
+      this.prisma.warehouse.count({ where: { tenantId } }),
+      this.prisma.warehouse.count({
+        where: { tenantId, createdAt: { gte: twoMonthsAgo } },
+      }),
+      this.prisma.user.count({
+        where: {
+          tenantId,
+          roles: { some: { role: { name: 'CLIENT' } } },
+        },
+      }),
+      this.prisma.user.count({
+        where: {
+          tenantId,
+          roles: { some: { role: { name: 'CLIENT' } } },
+          createdAt: { gte: twoMonthsAgo },
+        },
+      }),
+      this.prisma.receipt.aggregate({
+        where: { tenantId, status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] } },
+        _sum: { quantityAvailable: true },
+      }),
+      // --- Deltas ---
+      this.prisma.receipt.aggregate({
+        where: {
+          tenantId,
+          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+          createdAt: { gte: twoMonthsAgo },
+        },
+        _sum: { quantityAvailable: true },
+      }),
+      this.prisma.withdrawal.count({
+        where: { tenantId, status: WithdrawalStatus.PAID_PENDING_APPROVAL },
+      }),
+      this.prisma.withdrawal.count({
+        where: {
+          tenantId,
+          status: WithdrawalStatus.PAID_PENDING_APPROVAL,
+          createdAt: { gte: twoMonthsAgo },
+        },
+      }),
+    ]);
 
     return {
       totalWarehouses: warehouses,
+      warehousesDelta,
       totalClients: clients,
+      clientsDelta,
       totalCommodity: commodityResult._sum.quantityAvailable || 0,
+      commodityDelta: commodityDeltaResult._sum.quantityAvailable || 0,
       pendingRequests,
+      pendingRequestsDelta,
     };
   }
 
@@ -56,7 +103,7 @@ export class DashboardService {
 
   async getActivityTrend(tenantId: string, range: '7d' | '1m' | '6m' | '1y') {
     const now = new Date();
-    let startDate = new Date();
+    const startDate = new Date();
     switch (range) {
       case '7d':
         startDate.setDate(now.getDate() - 7);
@@ -84,7 +131,10 @@ export class DashboardService {
     ]);
 
     // Simple day-based aggregation
-    const dataMap = new Map<string, { deposits: number; withdrawals: number }>();
+    const dataMap = new Map<
+      string,
+      { deposits: number; withdrawals: number }
+    >();
 
     receipts.forEach((r) => {
       const date = r.createdAt.toISOString().split('T')[0];
@@ -186,7 +236,9 @@ export class DashboardService {
       }),
     );
 
-    return activities.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, 10);
+    return activities
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      .slice(0, 10);
   }
 
   // --- Phase 3.2: Drill-downs ---
@@ -199,7 +251,11 @@ export class DashboardService {
 
     const [stock, loans, activities] = await Promise.all([
       this.prisma.receipt.aggregate({
-        where: { tenantId, clientId, status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] } },
+        where: {
+          tenantId,
+          clientId,
+          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+        },
         _sum: { quantityAvailable: true },
       }),
       this.prisma.loan.findMany({
@@ -244,12 +300,20 @@ export class DashboardService {
     const [stockByWarehouse, stockByGrade] = await Promise.all([
       this.prisma.receipt.groupBy({
         by: ['warehouseId'],
-        where: { tenantId, commodityId, status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] } },
+        where: {
+          tenantId,
+          commodityId,
+          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+        },
         _sum: { quantityAvailable: true },
       }),
       this.prisma.receipt.groupBy({
         by: ['grade'],
-        where: { tenantId, commodityId, status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] } },
+        where: {
+          tenantId,
+          commodityId,
+          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+        },
         _sum: { quantityAvailable: true },
       }),
     ]);
@@ -265,7 +329,8 @@ export class DashboardService {
         unit: commodity.unitOfMeasure,
       },
       distributionByWarehouse: stockByWarehouse.map((s) => ({
-        warehouse: warehouses.find((w) => w.id === s.warehouseId)?.name || 'Unknown',
+        warehouse:
+          warehouses.find((w) => w.id === s.warehouseId)?.name || 'Unknown',
         quantity: s._sum.quantityAvailable || 0,
       })),
       distributionByGrade: stockByGrade.map((s) => ({

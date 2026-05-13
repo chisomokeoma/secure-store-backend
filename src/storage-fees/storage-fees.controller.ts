@@ -1,5 +1,20 @@
-import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiBody } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiQuery,
+  ApiBody,
+} from '@nestjs/swagger';
 import { StorageFeesService } from './storage-fees.service';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -25,7 +40,11 @@ export class StorageFeesController {
     @Query('commodityId') commodityId?: string,
     @Query('isActive') isActive?: string,
   ) {
-    return this.storageFeesService.getPolicies(tenantId, { warehouseId, commodityId, isActive });
+    return this.storageFeesService.getPolicies(tenantId, {
+      warehouseId,
+      commodityId,
+      isActive,
+    });
   }
 
   @Post()
@@ -33,13 +52,30 @@ export class StorageFeesController {
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['feeType', 'rate', 'billingFrequency', 'gracePeriodDays', 'latePenaltyPct'],
+      required: [
+        'feeType',
+        'rate',
+        'billingFrequency',
+        'gracePeriodDays',
+        'latePenaltyPct',
+      ],
       properties: {
-        feeType: { type: 'string', enum: ['PER_MT_PER_MONTH', 'PER_BAG_PER_WEEK', 'PER_MT_PER_DAY', 'FLAT_RATE'] },
+        feeType: {
+          type: 'string',
+          enum: [
+            'PER_MT_PER_MONTH',
+            'PER_BAG_PER_WEEK',
+            'PER_MT_PER_DAY',
+            'FLAT_RATE',
+          ],
+        },
         warehouseId: { type: 'string', nullable: true },
         commodityId: { type: 'string', nullable: true },
         rate: { type: 'number', example: 500 },
-        billingFrequency: { type: 'string', enum: ['DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUALLY'] },
+        billingFrequency: {
+          type: 'string',
+          enum: ['DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUALLY'],
+        },
         gracePeriodDays: { type: 'integer', example: 7 },
         latePenaltyPct: { type: 'number', example: 5 },
         currency: { type: 'string', default: 'NGN' },
@@ -68,7 +104,10 @@ export class StorageFeesController {
 
   @Post(':id/deactivate')
   @ApiOperation({ summary: 'Deactivate a policy' })
-  deactivate(@CurrentUser('tenantId') tenantId: string, @Param('id') id: string) {
+  deactivate(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
     return this.storageFeesService.deactivate(tenantId, id);
   }
 }

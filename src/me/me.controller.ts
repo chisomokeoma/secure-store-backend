@@ -68,7 +68,10 @@ export class MeController {
       },
     },
   })
-  updateNotificationPrefs(@CurrentUser('id') userId: string, @Body() body: any) {
+  updateNotificationPrefs(
+    @CurrentUser('id') userId: string,
+    @Body() body: any,
+  ) {
     return this.meService.updateNotificationPrefs(userId, body);
   }
 }

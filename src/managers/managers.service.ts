@@ -8,7 +8,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
-import { CreateManagerDto, UpdateManagerDto, AssignWarehousesDto } from './dto/manager.dto';
+import {
+  CreateManagerDto,
+  UpdateManagerDto,
+  AssignWarehousesDto,
+} from './dto/manager.dto';
 
 @Injectable()
 export class ManagersService {
@@ -19,21 +23,33 @@ export class ManagersService {
   // ─────────────────────────────────────────────────────────────
 
   /** Derives platform login email: firstname.lastname@securestore.com with collision suffix */
-  private async deriveLoginEmail(firstName: string, lastName: string): Promise<string> {
-    const base = `${firstName.toLowerCase()}.${lastName.toLowerCase()}`.replace(/\s+/g, '');
+  private async deriveLoginEmail(
+    firstName: string,
+    lastName: string,
+  ): Promise<string> {
+    const base = `${firstName.toLowerCase()}.${lastName.toLowerCase()}`.replace(
+      /\s+/g,
+      '',
+    );
     const domain = 'securestore.com';
     const candidate = `${base}@${domain}`;
 
-    const existing = await this.prisma.user.findUnique({ where: { email: candidate } });
+    const existing = await this.prisma.user.findUnique({
+      where: { email: candidate },
+    });
     if (!existing) return candidate;
 
     // Suffix collision resolution
     for (let i = 2; i <= 99; i++) {
       const suffixed = `${base}${i}@${domain}`;
-      const conflict = await this.prisma.user.findUnique({ where: { email: suffixed } });
+      const conflict = await this.prisma.user.findUnique({
+        where: { email: suffixed },
+      });
       if (!conflict) return suffixed;
     }
-    throw new ConflictException('Cannot generate a unique login email for this name combination');
+    throw new ConflictException(
+      'Cannot generate a unique login email for this name combination',
+    );
   }
 
   /** Generates a secure 12-char temp password: mixed case + digits + symbol */
@@ -111,7 +127,12 @@ export class ManagersService {
       }),
       this.prisma.user.count({ where }),
       this.prisma.user.count({ where: { ...where, status: 'ACTIVE' } }),
-      this.prisma.user.count({ where: { ...where, status: { in: ['INACTIVE', 'DEACTIVATED', 'SUSPENDED'] } } }),
+      this.prisma.user.count({
+        where: {
+          ...where,
+          status: { in: ['INACTIVE', 'DEACTIVATED', 'SUSPENDED'] },
+        },
+      }),
     ]);
 
     return {
@@ -123,7 +144,11 @@ export class ManagersService {
 
   async getManagerById(tenantId: string, id: string) {
     const manager = await this.prisma.user.findFirst({
-      where: { id, tenantId, roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } } },
+      where: {
+        id,
+        tenantId,
+        roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } },
+      },
       select: {
         id: true,
         email: true,
@@ -145,7 +170,15 @@ export class ManagersService {
         managerAssignments: {
           where: { unassignedAt: null },
           include: {
-            warehouse: { select: { id: true, name: true, code: true, location: true, capacityMt: true } },
+            warehouse: {
+              select: {
+                id: true,
+                name: true,
+                code: true,
+                location: true,
+                capacityMt: true,
+              },
+            },
           },
         },
       },
@@ -181,7 +214,9 @@ export class ManagersService {
     const limit = Math.min(parseInt(query.limit || '20', 10), 100);
     const skip = (page - 1) * limit;
 
-    const manager = await this.prisma.user.findFirst({ where: { id, tenantId } });
+    const manager = await this.prisma.user.findFirst({
+      where: { id, tenantId },
+    });
     if (!manager) throw new NotFoundException('Manager not found');
 
     // Get warehouse IDs this manager currently manages
@@ -221,7 +256,10 @@ export class ManagersService {
       this.prisma.user.count({ where }),
     ]);
 
-    return { data: clients, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    return {
+      data: clients,
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -235,10 +273,16 @@ export class ManagersService {
     const managerRole = await this.prisma.role.findUnique({
       where: { name: 'WAREHOUSE_MANAGER' },
     });
-    if (!managerRole) throw new BadRequestException('WAREHOUSE_MANAGER role not configured. Run seed.');
+    if (!managerRole)
+      throw new BadRequestException(
+        'WAREHOUSE_MANAGER role not configured. Run seed.',
+      );
 
     // 2. Auto-generate email, password, manager code
-    const loginEmail = await this.deriveLoginEmail(personalInfo.firstName, personalInfo.lastName);
+    const loginEmail = await this.deriveLoginEmail(
+      personalInfo.firstName,
+      personalInfo.lastName,
+    );
     const tempPassword = this.generateTempPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
     const managerCode = await this.generateManagerCode();
@@ -249,7 +293,9 @@ export class ManagersService {
         where: { id: { in: warehouseIds }, tenantId },
       });
       if (warehouses.length !== warehouseIds.length) {
-        throw new BadRequestException('One or more warehouse IDs are invalid or do not belong to this tenant');
+        throw new BadRequestException(
+          'One or more warehouse IDs are invalid or do not belong to this tenant',
+        );
       }
     }
 
@@ -263,11 +309,15 @@ export class ManagersService {
           middleName: personalInfo.middleName,
           lastName: personalInfo.lastName,
           gender: personalInfo.gender,
-          dateOfBirth: personalInfo.dateOfBirth ? new Date(personalInfo.dateOfBirth) : undefined,
+          dateOfBirth: personalInfo.dateOfBirth
+            ? new Date(personalInfo.dateOfBirth)
+            : undefined,
           residentialAddress: personalInfo.residentialAddress,
           phoneNumber: personalInfo.phoneNumber,
           contactEmail: personalInfo.contactEmail,
-          employmentDate: personalInfo.employmentDate ? new Date(personalInfo.employmentDate) : undefined,
+          employmentDate: personalInfo.employmentDate
+            ? new Date(personalInfo.employmentDate)
+            : undefined,
           profilePhotoUrl: personalInfo.profilePhotoUrl,
           managerCode,
           tenantId,
@@ -305,10 +355,11 @@ export class ManagersService {
     });
 
     // 5. Fetch assigned warehouses for response
-    const assignedWarehouses = await this.prisma.warehouseManagerAssignment.findMany({
-      where: { managerId: manager.id, unassignedAt: null },
-      include: { warehouse: { select: { id: true, name: true } } },
-    });
+    const assignedWarehouses =
+      await this.prisma.warehouseManagerAssignment.findMany({
+        where: { managerId: manager.id, unassignedAt: null },
+        include: { warehouse: { select: { id: true, name: true } } },
+      });
 
     return {
       manager: {
@@ -334,7 +385,11 @@ export class ManagersService {
 
   async updateManager(tenantId: string, id: string, dto: UpdateManagerDto) {
     const manager = await this.prisma.user.findFirst({
-      where: { id, tenantId, roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } } },
+      where: {
+        id,
+        tenantId,
+        roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } },
+      },
     });
     if (!manager) throw new NotFoundException('Manager not found');
 
@@ -350,21 +405,37 @@ export class ManagersService {
         residentialAddress: info.residentialAddress,
         phoneNumber: info.phoneNumber,
         contactEmail: info.contactEmail,
-        employmentDate: info.employmentDate ? new Date(info.employmentDate) : undefined,
+        employmentDate: info.employmentDate
+          ? new Date(info.employmentDate)
+          : undefined,
         profilePhotoUrl: info.profilePhotoUrl,
-        permissions: dto.accountSetup?.permissions as any ?? undefined,
-        notificationPrefs: dto.accountSetup?.notificationPrefs as any ?? undefined,
+        permissions: (dto.accountSetup?.permissions as any) ?? undefined,
+        notificationPrefs:
+          (dto.accountSetup?.notificationPrefs as any) ?? undefined,
       },
       select: {
-        id: true, email: true, firstName: true, lastName: true,
-        managerCode: true, status: true, updatedAt: true,
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        managerCode: true,
+        status: true,
+        updatedAt: true,
       },
     });
   }
 
-  private async setManagerStatus(tenantId: string, id: string, status: UserStatus) {
+  private async setManagerStatus(
+    tenantId: string,
+    id: string,
+    status: UserStatus,
+  ) {
     const manager = await this.prisma.user.findFirst({
-      where: { id, tenantId, roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } } },
+      where: {
+        id,
+        tenantId,
+        roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } },
+      },
     });
     if (!manager) throw new NotFoundException('Manager not found');
     return this.prisma.user.update({ where: { id }, data: { status } });
@@ -386,7 +457,12 @@ export class ManagersService {
   // WAREHOUSE ASSIGNMENT
   // ─────────────────────────────────────────────────────────────
 
-  async assignWarehouses(tenantId: string, managerId: string, dto: AssignWarehousesDto, assignedBy: string) {
+  async assignWarehouses(
+    tenantId: string,
+    managerId: string,
+    dto: AssignWarehousesDto,
+    assignedBy: string,
+  ) {
     const manager = await this.prisma.user.findFirst({
       where: { id: managerId, tenantId },
     });
@@ -410,14 +486,26 @@ export class ManagersService {
 
     if (newIds.length > 0) {
       await this.prisma.warehouseManagerAssignment.createMany({
-        data: newIds.map((warehouseId) => ({ tenantId, warehouseId, managerId, assignedBy })),
+        data: newIds.map((warehouseId) => ({
+          tenantId,
+          warehouseId,
+          managerId,
+          assignedBy,
+        })),
       });
     }
 
-    return { assigned: newIds.length, alreadyAssigned: dto.warehouseIds.length - newIds.length };
+    return {
+      assigned: newIds.length,
+      alreadyAssigned: dto.warehouseIds.length - newIds.length,
+    };
   }
 
-  async unassignWarehouse(tenantId: string, managerId: string, warehouseId: string) {
+  async unassignWarehouse(
+    tenantId: string,
+    managerId: string,
+    warehouseId: string,
+  ) {
     const assignment = await this.prisma.warehouseManagerAssignment.findFirst({
       where: { managerId, warehouseId, tenantId, unassignedAt: null },
     });
@@ -435,14 +523,21 @@ export class ManagersService {
 
   async resetPassword(tenantId: string, id: string) {
     const manager = await this.prisma.user.findFirst({
-      where: { id, tenantId, roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } } },
+      where: {
+        id,
+        tenantId,
+        roles: { some: { role: { name: 'WAREHOUSE_MANAGER' } } },
+      },
     });
     if (!manager) throw new NotFoundException('Manager not found');
 
     const tempPassword = this.generateTempPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
-    await this.prisma.user.update({ where: { id }, data: { password: hashedPassword } });
+    await this.prisma.user.update({
+      where: { id },
+      data: { password: hashedPassword },
+    });
 
     return {
       credentials: {

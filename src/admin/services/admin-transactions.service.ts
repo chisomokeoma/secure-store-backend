@@ -39,7 +39,9 @@ export class AdminTransactionsService {
           receipt: {
             include: {
               warehouse: { select: { id: true, name: true } },
-              commodity: { select: { id: true, name: true, unitOfMeasure: true } },
+              commodity: {
+                select: { id: true, name: true, unitOfMeasure: true },
+              },
             },
           },
           client: { select: { id: true, firstName: true, lastName: true } },
@@ -81,7 +83,9 @@ export class AdminTransactionsService {
           receipt: {
             include: {
               warehouse: { select: { id: true, name: true } },
-              commodity: { select: { id: true, name: true, unitOfMeasure: true } },
+              commodity: {
+                select: { id: true, name: true, unitOfMeasure: true },
+              },
             },
           },
           seller: { select: { id: true, firstName: true, lastName: true } },
@@ -93,7 +97,10 @@ export class AdminTransactionsService {
     }
 
     // Sort combined results by createdAt desc
-    results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    results.sort(
+      (a, b) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
 
     const total = results.length;
     const paginated = results.slice(skip, skip + limit);
@@ -106,9 +113,19 @@ export class AdminTransactionsService {
 
   async exportTransactions(
     tenantId: string,
-    query: { format?: string; type?: string; warehouseId?: string; from?: string; to?: string },
+    query: {
+      format?: string;
+      type?: string;
+      warehouseId?: string;
+      from?: string;
+      to?: string;
+    },
   ) {
-    const { data } = await this.getTransactions(tenantId, { ...query, page: '1', limit: '10000' });
+    const { data } = await this.getTransactions(tenantId, {
+      ...query,
+      page: '1',
+      limit: '10000',
+    });
 
     if (query.format === 'csv') {
       const headers = ['id', 'type', 'status', 'createdAt'];

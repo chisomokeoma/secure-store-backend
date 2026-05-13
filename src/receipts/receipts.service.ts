@@ -31,7 +31,9 @@ export class ReceiptsService {
       where.OR = [
         { receiptNumber: { contains: filters.search, mode: 'insensitive' } },
         {
-          commodity: { name: { contains: filters.search, mode: 'insensitive' } },
+          commodity: {
+            name: { contains: filters.search, mode: 'insensitive' },
+          },
         },
       ];
     }

@@ -1,7 +1,19 @@
-import { Controller, Get, Patch, Post, Body, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Patch,
+  Post,
+  Body,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { UsersService } from './users.service';
-import { UpdateProfileDto, ChangePasswordDto, UserPreferencesDto } from './dto/users.dto';
+import {
+  UpdateProfileDto,
+  ChangePasswordDto,
+  UserPreferencesDto,
+} from './dto/users.dto';
 import { UserProfileDto, BaseResponseDto } from '../auth/dto/auth.dto';
 
 @ApiTags('User Settings')

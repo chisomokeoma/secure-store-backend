@@ -11,14 +11,32 @@ export class DashboardSummaryDto {
   @ApiProperty()
   totalWarehouses!: number;
 
+  @ApiProperty({ description: 'Warehouses registered in the last 2 months' })
+  warehousesDelta!: number;
+
   @ApiProperty()
   totalClients!: number;
 
-  @ApiProperty()
-  totalCommodity!: number; // Simplified to number for total volume
+  @ApiProperty({ description: 'Clients registered in the last 2 months' })
+  clientsDelta!: number;
+
+  @ApiProperty({
+    description: 'Total commodity volume in metric tons (ACTIVE/PLEDGED/LIEN)',
+  })
+  totalCommodity!: number;
+
+  @ApiProperty({
+    description: 'Commodity (metric tons) collected in the last 2 months',
+  })
+  commodityDelta!: number;
 
   @ApiProperty()
   pendingRequests!: number;
+
+  @ApiProperty({
+    description: 'New pending requests raised in the last 2 months',
+  })
+  pendingRequestsDelta!: number;
 }
 
 export class CommodityBreakdownDto {

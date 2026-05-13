@@ -22,10 +22,7 @@ export class AdminClientController {
 
   @Post()
   @ApiOperation({ summary: 'Onboard a new client' })
-  createClient(
-    @CurrentUser('tenantId') tenantId: string,
-    @Body() body: any,
-  ) {
+  createClient(@CurrentUser('tenantId') tenantId: string, @Body() body: any) {
     return this.adminClientService.createClient(tenantId, body);
   }
 }

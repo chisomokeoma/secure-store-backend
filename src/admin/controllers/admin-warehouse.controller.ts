@@ -1,8 +1,22 @@
 import {
-  Controller, Get, Post, Patch, Delete,
-  Body, Param, Query, UseGuards,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Body,
+  Param,
+  Query,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiParam, ApiBody } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiQuery,
+  ApiParam,
+  ApiBody,
+} from '@nestjs/swagger';
 import { AdminWarehouseService } from '../services/admin-warehouse.service';
 import { JwtAuthGuard } from '../../auth/jwt.guard';
 import { RolesGuard } from '../../auth/roles.guard';
@@ -19,7 +33,11 @@ export class AdminWarehouseController {
 
   @Get()
   @ApiOperation({ summary: 'List all warehouses with stats and filters' })
-  @ApiQuery({ name: 'status', required: false, enum: ['ACTIVE', 'INACTIVE', 'MAINTENANCE'] })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['ACTIVE', 'INACTIVE', 'MAINTENANCE'],
+  })
   @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'page', required: false })
   @ApiQuery({ name: 'limit', required: false })
@@ -30,11 +48,19 @@ export class AdminWarehouseController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.service.getWarehouses(tenantId, { status, search, page, limit });
+    return this.service.getWarehouses(tenantId, {
+      status,
+      search,
+      page,
+      limit,
+    });
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get full warehouse detail with managers, summary, recent receipts' })
+  @ApiOperation({
+    summary:
+      'Get full warehouse detail with managers, summary, recent receipts',
+  })
   getWarehouseById(
     @CurrentUser('tenantId') tenantId: string,
     @Param('id') id: string,
@@ -56,7 +82,12 @@ export class AdminWarehouseController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.service.getWarehouseReceipts(tenantId, id, { status, approvalStatus, page, limit });
+    return this.service.getWarehouseReceipts(tenantId, id, {
+      status,
+      approvalStatus,
+      page,
+      limit,
+    });
   }
 
   @Get(':id/managers')
@@ -87,7 +118,10 @@ export class AdminWarehouseController {
       },
     },
   })
-  createWarehouse(@CurrentUser('tenantId') tenantId: string, @Body() body: any) {
+  createWarehouse(
+    @CurrentUser('tenantId') tenantId: string,
+    @Body() body: any,
+  ) {
     return this.service.createWarehouse(tenantId, body);
   }
 
@@ -103,7 +137,12 @@ export class AdminWarehouseController {
 
   @Post(':id/assign-managers')
   @ApiOperation({ summary: 'Bulk assign managers to a warehouse' })
-  @ApiBody({ schema: { type: 'object', properties: { managerIds: { type: 'array', items: { type: 'string' } } } } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { managerIds: { type: 'array', items: { type: 'string' } } },
+    },
+  })
   assignManagers(
     @CurrentUser('tenantId') tenantId: string,
     @CurrentUser('id') userId: string,
@@ -115,7 +154,9 @@ export class AdminWarehouseController {
 
   @Post(':id/commodities')
   @ApiOperation({ summary: 'Link a commodity to a warehouse' })
-  @ApiBody({ schema: { type: 'object', properties: { commodityId: { type: 'string' } } } })
+  @ApiBody({
+    schema: { type: 'object', properties: { commodityId: { type: 'string' } } },
+  })
   addCommodity(
     @CurrentUser('tenantId') tenantId: string,
     @Param('id') id: string,

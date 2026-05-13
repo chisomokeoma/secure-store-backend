@@ -54,7 +54,7 @@ export class AdminActivityService {
         entityType: data.entityType,
         entityId: data.entityId,
         description: data.description,
-        metadata: data.metadata as any,
+        metadata: data.metadata,
       },
     });
   }

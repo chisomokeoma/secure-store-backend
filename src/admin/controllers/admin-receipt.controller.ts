@@ -1,5 +1,19 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiBody } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiQuery,
+  ApiBody,
+} from '@nestjs/swagger';
 import { AdminReceiptService } from '../services/admin-receipt.service';
 import { JwtAuthGuard } from '../../auth/jwt.guard';
 import { RolesGuard } from '../../auth/roles.guard';
@@ -17,7 +31,11 @@ export class AdminReceiptController {
   @Get()
   @ApiOperation({ summary: 'List all receipts with filters' })
   @ApiQuery({ name: 'status', required: false })
-  @ApiQuery({ name: 'approvalStatus', required: false, enum: ['PENDING', 'APPROVED', 'REJECTED'] })
+  @ApiQuery({
+    name: 'approvalStatus',
+    required: false,
+    enum: ['PENDING', 'APPROVED', 'REJECTED'],
+  })
   @ApiQuery({ name: 'warehouseId', required: false })
   @ApiQuery({ name: 'clientId', required: false })
   @ApiQuery({ name: 'page', required: false })
@@ -32,7 +50,12 @@ export class AdminReceiptController {
     @Query('limit') limit?: string,
   ) {
     return this.adminReceiptService.getReceipts(tenantId, {
-      status, approvalStatus, warehouseId, clientId, page, limit,
+      status,
+      approvalStatus,
+      warehouseId,
+      clientId,
+      page,
+      limit,
     });
   }
 
@@ -53,7 +76,9 @@ export class AdminReceiptController {
 
   @Post(':id/approve')
   @ApiOperation({ summary: 'Approve a receipt' })
-  @ApiBody({ schema: { type: 'object', properties: { notes: { type: 'string' } } } })
+  @ApiBody({
+    schema: { type: 'object', properties: { notes: { type: 'string' } } },
+  })
   approveReceipt(
     @CurrentUser('tenantId') tenantId: string,
     @CurrentUser('id') userId: string,
@@ -65,13 +90,24 @@ export class AdminReceiptController {
 
   @Post(':id/reject')
   @ApiOperation({ summary: 'Reject a receipt with a reason' })
-  @ApiBody({ schema: { type: 'object', required: ['rejectionReason'], properties: { rejectionReason: { type: 'string' } } } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['rejectionReason'],
+      properties: { rejectionReason: { type: 'string' } },
+    },
+  })
   rejectReceipt(
     @CurrentUser('tenantId') tenantId: string,
     @CurrentUser('id') userId: string,
     @Param('id') id: string,
     @Body('rejectionReason') rejectionReason: string,
   ) {
-    return this.adminReceiptService.rejectReceipt(tenantId, id, userId, rejectionReason);
+    return this.adminReceiptService.rejectReceipt(
+      tenantId,
+      id,
+      userId,
+      rejectionReason,
+    );
   }
 }

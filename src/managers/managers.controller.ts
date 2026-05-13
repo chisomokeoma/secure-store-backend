@@ -36,8 +36,14 @@ export class ManagersController {
   constructor(private readonly managersService: ManagersService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all warehouse managers with stats and pagination' })
-  @ApiQuery({ name: 'status', required: false, enum: ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'DEACTIVATED'] })
+  @ApiOperation({
+    summary: 'List all warehouse managers with stats and pagination',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'DEACTIVATED'],
+  })
   @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'page', required: false })
   @ApiQuery({ name: 'limit', required: false })
@@ -48,7 +54,12 @@ export class ManagersController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.managersService.getManagers(tenantId, { status, search, page, limit });
+    return this.managersService.getManagers(tenantId, {
+      status,
+      search,
+      page,
+      limit,
+    });
   }
 
   @Get(':id')
@@ -72,7 +83,10 @@ export class ManagersController {
   }
 
   @Get(':id/clients')
-  @ApiOperation({ summary: 'Get clients whose receipts are in warehouses managed by this manager' })
+  @ApiOperation({
+    summary:
+      'Get clients whose receipts are in warehouses managed by this manager',
+  })
   @ApiParam({ name: 'id' })
   @ApiQuery({ name: 'status', required: false })
   @ApiQuery({ name: 'page', required: false })
@@ -84,13 +98,18 @@ export class ManagersController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.managersService.getManagerClients(tenantId, id, { status, page, limit });
+    return this.managersService.getManagerClients(tenantId, id, {
+      status,
+      page,
+      limit,
+    });
   }
 
   @Post()
   @ApiOperation({
     summary: 'Create a new warehouse manager',
-    description: 'Auto-generates login email, manager code, and temporary password. Returns credentials ONCE.',
+    description:
+      'Auto-generates login email, manager code, and temporary password. Returns credentials ONCE.',
   })
   createManager(
     @CurrentUser('tenantId') tenantId: string,
@@ -141,7 +160,9 @@ export class ManagersController {
   }
 
   @Post(':id/assign-warehouses')
-  @ApiOperation({ summary: 'Bulk assign warehouses to a manager (additive, idempotent)' })
+  @ApiOperation({
+    summary: 'Bulk assign warehouses to a manager (additive, idempotent)',
+  })
   @ApiParam({ name: 'id' })
   assignWarehouses(
     @CurrentUser('tenantId') tenantId: string,
@@ -153,7 +174,9 @@ export class ManagersController {
   }
 
   @Delete(':id/warehouses/:warehouseId')
-  @ApiOperation({ summary: 'Unassign a manager from a warehouse (soft delete)' })
+  @ApiOperation({
+    summary: 'Unassign a manager from a warehouse (soft delete)',
+  })
   @ApiParam({ name: 'id', description: 'Manager ID' })
   @ApiParam({ name: 'warehouseId' })
   unassignWarehouse(

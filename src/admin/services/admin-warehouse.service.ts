@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReceiptStatus, WarehouseStatus } from '@prisma/client';
 
@@ -37,7 +41,12 @@ export class AdminWarehouseService {
             where: { unassignedAt: null },
             include: {
               manager: {
-                select: { id: true, firstName: true, lastName: true, managerCode: true },
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  managerCode: true,
+                },
               },
             },
           },
@@ -52,7 +61,10 @@ export class AdminWarehouseService {
       where: { tenantId },
       select: { capacityMt: true, status: true },
     });
-    const totalCapacityMt = allWarehouses.reduce((s, w) => s + (w.capacityMt ?? 0), 0);
+    const totalCapacityMt = allWarehouses.reduce(
+      (s, w) => s + (w.capacityMt ?? 0),
+      0,
+    );
 
     // Total utilized: sum of quantityAvailable on active receipts
     const utilizationAgg = await this.prisma.receipt.aggregate({
@@ -82,12 +94,22 @@ export class AdminWarehouseService {
           where: { unassignedAt: null },
           include: {
             manager: {
-              select: { id: true, firstName: true, lastName: true, email: true, managerCode: true },
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                managerCode: true,
+              },
             },
           },
         },
         warehouseCommodities: {
-          include: { commodity: { select: { id: true, name: true, unitOfMeasure: true } } },
+          include: {
+            commodity: {
+              select: { id: true, name: true, unitOfMeasure: true },
+            },
+          },
         },
       },
     });
@@ -95,10 +117,12 @@ export class AdminWarehouseService {
 
     // Summary stats
     const [totalClients, totalReceipts, commodityAgg] = await Promise.all([
-      this.prisma.receipt.groupBy({
-        by: ['clientId'],
-        where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
-      }).then((r) => r.length),
+      this.prisma.receipt
+        .groupBy({
+          by: ['clientId'],
+          where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
+        })
+        .then((r) => r.length),
       this.prisma.receipt.count({ where: { warehouseId: id, tenantId } }),
       this.prisma.receipt.aggregate({
         where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
@@ -134,9 +158,16 @@ export class AdminWarehouseService {
   async getWarehouseReceipts(
     tenantId: string,
     warehouseId: string,
-    query: { status?: string; approvalStatus?: string; page?: string; limit?: string },
+    query: {
+      status?: string;
+      approvalStatus?: string;
+      page?: string;
+      limit?: string;
+    },
   ) {
-    const warehouse = await this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } });
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, tenantId },
+    });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
     const page = parseInt(query.page || '1', 10);
@@ -161,20 +192,32 @@ export class AdminWarehouseService {
       this.prisma.receipt.count({ where }),
     ]);
 
-    return { data: receipts, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    return {
+      data: receipts,
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   // ─── MANAGERS FOR A WAREHOUSE ───────────────────────────────────────────────
 
   async getWarehouseManagers(tenantId: string, warehouseId: string) {
-    const warehouse = await this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } });
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, tenantId },
+    });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
     return this.prisma.warehouseManagerAssignment.findMany({
       where: { warehouseId, tenantId, unassignedAt: null },
       include: {
         manager: {
-          select: { id: true, firstName: true, lastName: true, email: true, managerCode: true, status: true },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            managerCode: true,
+            status: true,
+          },
         },
       },
     });
@@ -210,8 +253,15 @@ export class AdminWarehouseService {
       // Link commodities via WarehouseCommodity upsert
       for (const commodityId of commodityIds) {
         await tx.warehouseCommodity.upsert({
-          where: { warehouseId_commodityId: { warehouseId: warehouse.id, commodityId } },
-          create: { warehouseId: warehouse.id, commodityId, tenantId, storageFeePerUnit: 0 },
+          where: {
+            warehouseId_commodityId: { warehouseId: warehouse.id, commodityId },
+          },
+          create: {
+            warehouseId: warehouse.id,
+            commodityId,
+            tenantId,
+            storageFeePerUnit: 0,
+          },
           update: {},
         });
       }
@@ -249,7 +299,9 @@ export class AdminWarehouseService {
       status?: WarehouseStatus;
     },
   ) {
-    const warehouse = await this.prisma.warehouse.findFirst({ where: { id, tenantId } });
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id, tenantId },
+    });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
     return this.prisma.warehouse.update({ where: { id }, data: dto });
@@ -257,7 +309,11 @@ export class AdminWarehouseService {
 
   // ─── COMMODITY LINKING ─────────────────────────────────────────────────────
 
-  async addCommodity(tenantId: string, warehouseId: string, commodityId: string) {
+  async addCommodity(
+    tenantId: string,
+    warehouseId: string,
+    commodityId: string,
+  ) {
     const [warehouse, commodity] = await Promise.all([
       this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } }),
       this.prisma.commodity.findFirst({ where: { id: commodityId, tenantId } }),
@@ -272,17 +328,29 @@ export class AdminWarehouseService {
     });
   }
 
-  async removeCommodity(tenantId: string, warehouseId: string, commodityId: string) {
+  async removeCommodity(
+    tenantId: string,
+    warehouseId: string,
+    commodityId: string,
+  ) {
     const wc = await this.prisma.warehouseCommodity.findFirst({
       where: { warehouseId, commodityId, tenantId },
     });
-    if (!wc) throw new NotFoundException('Commodity not linked to this warehouse');
+    if (!wc)
+      throw new NotFoundException('Commodity not linked to this warehouse');
 
     const hasActiveReceipts = await this.prisma.receipt.count({
-      where: { warehouseId, commodityId, tenantId, status: ReceiptStatus.ACTIVE },
+      where: {
+        warehouseId,
+        commodityId,
+        tenantId,
+        status: ReceiptStatus.ACTIVE,
+      },
     });
     if (hasActiveReceipts > 0) {
-      throw new BadRequestException('Cannot remove commodity: there are active receipts for it in this warehouse');
+      throw new BadRequestException(
+        'Cannot remove commodity: there are active receipts for it in this warehouse',
+      );
     }
 
     return this.prisma.warehouseCommodity.delete({ where: { id: wc.id } });
@@ -296,7 +364,9 @@ export class AdminWarehouseService {
     managerIds: string[],
     assignedBy: string,
   ) {
-    const warehouse = await this.prisma.warehouse.findFirst({ where: { id: warehouseId, tenantId } });
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, tenantId },
+    });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
     const existing = await this.prisma.warehouseManagerAssignment.findMany({
@@ -308,10 +378,18 @@ export class AdminWarehouseService {
 
     if (newIds.length > 0) {
       await this.prisma.warehouseManagerAssignment.createMany({
-        data: newIds.map((managerId) => ({ tenantId, warehouseId, managerId, assignedBy })),
+        data: newIds.map((managerId) => ({
+          tenantId,
+          warehouseId,
+          managerId,
+          assignedBy,
+        })),
       });
     }
 
-    return { assigned: newIds.length, alreadyAssigned: managerIds.length - newIds.length };
+    return {
+      assigned: newIds.length,
+      alreadyAssigned: managerIds.length - newIds.length,
+    };
   }
 }

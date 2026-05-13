@@ -70,7 +70,9 @@ export class MeService {
     newPassword: string,
   ) {
     if (!currentPassword || !newPassword) {
-      throw new BadRequestException('currentPassword and newPassword are required');
+      throw new BadRequestException(
+        'currentPassword and newPassword are required',
+      );
     }
 
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
@@ -82,7 +84,9 @@ export class MeService {
     }
 
     if (newPassword === currentPassword) {
-      throw new BadRequestException('New password must be different from the current password');
+      throw new BadRequestException(
+        'New password must be different from the current password',
+      );
     }
 
     // Minimum 8 chars, uppercase, lowercase, digit
@@ -94,7 +98,10 @@ export class MeService {
     }
 
     const hashed = await bcrypt.hash(newPassword, 10);
-    await this.prisma.user.update({ where: { id: userId }, data: { password: hashed } });
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { password: hashed },
+    });
 
     return { message: 'Password changed successfully' };
   }

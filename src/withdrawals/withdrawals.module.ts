@@ -4,6 +4,6 @@ import { WithdrawalsService } from './withdrawals.service';
 
 @Module({
   controllers: [WithdrawalsController],
-  providers: [WithdrawalsService]
+  providers: [WithdrawalsService],
 })
 export class WithdrawalsModule {}

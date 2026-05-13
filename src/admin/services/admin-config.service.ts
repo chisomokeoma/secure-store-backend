@@ -31,13 +31,13 @@ export class AdminConfigService {
       update: {
         unit: dto.unit,
         isDefective: dto.isDefective,
-        thresholds: dto.thresholds as any,
+        thresholds: dto.thresholds,
       },
       create: {
         name: dto.name,
         unit: dto.unit,
         isDefective: dto.isDefective,
-        thresholds: dto.thresholds as any,
+        thresholds: dto.thresholds,
         commodityId: dto.commodityId,
         tenantId,
       },

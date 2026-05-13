@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReceiptStatus } from '@prisma/client';
 
@@ -38,14 +42,19 @@ export class AdminReceiptService {
         include: {
           commodity: { select: { id: true, name: true, unitOfMeasure: true } },
           warehouse: { select: { id: true, name: true, code: true } },
-          client: { select: { id: true, firstName: true, lastName: true, email: true } },
+          client: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
           approvedBy: { select: { id: true, firstName: true, lastName: true } },
         },
       }),
       this.prisma.receipt.count({ where }),
     ]);
 
-    return { data: receipts, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    return {
+      data: receipts,
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   // ─── DETAIL ────────────────────────────────────────────────────────────────
@@ -56,7 +65,9 @@ export class AdminReceiptService {
       include: {
         commodity: true,
         warehouse: true,
-        client: { select: { id: true, firstName: true, lastName: true, email: true } },
+        client: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
         approvedBy: { select: { id: true, firstName: true, lastName: true } },
         withdrawals: true,
         loans: true,
@@ -75,7 +86,9 @@ export class AdminReceiptService {
       include: {
         commodity: { select: { id: true, name: true, unitOfMeasure: true } },
         warehouse: { select: { id: true, name: true, code: true } },
-        client: { select: { id: true, firstName: true, lastName: true, email: true } },
+        client: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
       },
     });
   }
@@ -89,10 +102,14 @@ export class AdminReceiptService {
     dto: { notes?: string },
   ) {
     return this.prisma.$transaction(async (tx) => {
-      const receipt = await tx.receipt.findFirst({ where: { id: receiptId, tenantId } });
+      const receipt = await tx.receipt.findFirst({
+        where: { id: receiptId, tenantId },
+      });
       if (!receipt) throw new NotFoundException('Receipt not found');
       if (receipt.approvalStatus !== 'PENDING') {
-        throw new BadRequestException(`Receipt is already ${receipt.approvalStatus}`);
+        throw new BadRequestException(
+          `Receipt is already ${receipt.approvalStatus}`,
+        );
       }
 
       return tx.receipt.update({
@@ -120,10 +137,14 @@ export class AdminReceiptService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const receipt = await tx.receipt.findFirst({ where: { id: receiptId, tenantId } });
+      const receipt = await tx.receipt.findFirst({
+        where: { id: receiptId, tenantId },
+      });
       if (!receipt) throw new NotFoundException('Receipt not found');
       if (receipt.approvalStatus !== 'PENDING') {
-        throw new BadRequestException(`Receipt is already ${receipt.approvalStatus}`);
+        throw new BadRequestException(
+          `Receipt is already ${receipt.approvalStatus}`,
+        );
       }
 
       return tx.receipt.update({

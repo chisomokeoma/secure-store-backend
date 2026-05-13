@@ -15,7 +15,9 @@ export class AdminReportController {
   constructor(private readonly adminReportService: AdminReportService) {}
 
   @Get('stock-summary')
-  @ApiOperation({ summary: 'Get total stock summary by commodity and warehouse' })
+  @ApiOperation({
+    summary: 'Get total stock summary by commodity and warehouse',
+  })
   getStockSummary(@CurrentUser('tenantId') tenantId: string) {
     return this.adminReportService.getStockSummary(tenantId);
   }

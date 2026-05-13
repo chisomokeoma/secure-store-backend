@@ -1,11 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  UseGuards,
-} from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AdminWithdrawalService } from '../services/admin-withdrawal.service';
 import { JwtAuthGuard } from '../../auth/jwt.guard';
@@ -19,7 +12,9 @@ import { CurrentUser } from '../../common/decorators/user.decorator';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('admin/withdrawals')
 export class AdminWithdrawalController {
-  constructor(private readonly adminWithdrawalService: AdminWithdrawalService) {}
+  constructor(
+    private readonly adminWithdrawalService: AdminWithdrawalService,
+  ) {}
 
   @Get('pending')
   @ApiOperation({ summary: 'List all withdrawals awaiting approval' })

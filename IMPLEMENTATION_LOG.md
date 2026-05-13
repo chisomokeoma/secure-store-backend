@@ -2,12 +2,38 @@
 
 ## Completed Tasks
 
-### 1. Dashboard Activity Trend
-- **Feature**: Implemented the "Activity Trend" line chart data flow.
-- **Service**: Added `getActivityTrend(tenantId, range)` in `DashboardService` to aggregate receipts (deposits) and withdrawals by time.
-- **Controller**: Updated `DashboardController` to accept a `range` parameter and scoped it to the current tenant.
-- **DTO**: Created `ActivityTrendDto` with `deposits`, `withdrawals`, and `activityCount`.
-- **Seed**: Updated `prisma/seed.ts` to include historical data over the last 6 months.
+### 1. Dashboard — Full Data Coverage (Phases 3.1 & 3.2)
+
+All endpoints are protected by `JwtAuthGuard` and scoped to the tenant via `@CurrentUser('tenantId')`.
+
+#### Endpoint Map
+
+| Endpoint | Guard | Handler | Data Sources |
+| :--- | :--- | :--- | :--- |
+| `GET /dashboard/summary` | `TENANT_ADMIN` / `GLOBAL_ADMIN` | `getSummary()` | Totals: `Warehouse.count`, `User.count` (role=CLIENT), `Receipt._sum(quantityAvailable)` (ACTIVE/PLEDGED/LIEN), `Withdrawal.count` (PAID_PENDING_APPROVAL) + **2-month delta versions of each** |
+| `GET /dashboard/commodity-breakdown` | JWT | `getCommodityBreakdown()` | `Receipt.groupBy(commodityId)` → joined with `Commodity` names |
+| `GET /dashboard/activity-trend?range=` | JWT | `getActivityTrend(range)` | `Receipt` + `Withdrawal` aggregated day-by-day; ranges: `7d`, `1m`, `6m`, `1y` |
+| `GET /dashboard/recent-activities` | JWT | `getRecentActivities()` | Top 5 from `Receipt`, `Withdrawal`, `Loan`, `Trade`; merged, sorted desc, sliced to 10 |
+| `GET /dashboard/clients/:id/summary` | `TENANT_ADMIN` / `GLOBAL_ADMIN` | `getClientDrilldown()` | `Receipt._sum`, `Loan` (ACTIVE), `Receipt` (last 10) |
+| `GET /dashboard/commodities/:id/summary` | `TENANT_ADMIN` / `GLOBAL_ADMIN` | `getCommodityDrilldown()` | `Receipt.groupBy(warehouseId)`, `Receipt.groupBy(grade)` |
+
+#### DTOs
+
+| DTO | Fields |
+| :--- | :--- |
+| `DashboardSummaryDto` | `totalWarehouses`, `warehousesDelta`, `totalClients`, `clientsDelta`, `totalCommodity` (metric tons), `commodityDelta`, `pendingRequests`, `pendingRequestsDelta` |
+| `CommodityBreakdownDto` | `name` (commodity name), `quantity` |
+| `ActivityTrendDto` | `date` (YYYY-MM-DD), `deposits`, `withdrawals`, `activityCount` |
+| `RecentActivityDto` | `id`, `type` (ActivityType enum), `title`, `description`, `timestamp`, `reference`, `status` |
+
+#### Activity Feed Merge Logic
+- Fetches **5 most recent** records from each of: `Receipt`, `Withdrawal`, `Loan`, `Trade`
+- Maps each to a `RecentActivityDto` with a consistent shape
+- Merges all into a single array, sorts by `timestamp` descending
+- Returns top **10** items
+
+#### Seed Data
+- Updated `prisma/seed.ts` to seed historical receipts and withdrawals over the last 6 months so `getActivityTrend` returns meaningful chart data from day one.
 
 ### 2. Phase 0 — Foundation (Multi-Tenancy)
 - [x] **Schema**: Added `Tenant` model and `tenantId` fields to all business entities.

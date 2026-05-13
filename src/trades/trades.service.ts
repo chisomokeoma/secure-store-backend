@@ -39,14 +39,20 @@ export class TradesService {
         },
         {
           receipt: {
-            commodity: { name: { contains: filters.search, mode: 'insensitive' } },
+            commodity: {
+              name: { contains: filters.search, mode: 'insensitive' },
+            },
           },
         },
         {
-          seller: { firstName: { contains: filters.search, mode: 'insensitive' } },
+          seller: {
+            firstName: { contains: filters.search, mode: 'insensitive' },
+          },
         },
         {
-          seller: { lastName: { contains: filters.search, mode: 'insensitive' } },
+          seller: {
+            lastName: { contains: filters.search, mode: 'insensitive' },
+          },
         },
       ];
     }
