@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   IsString,
   IsNotEmpty,
@@ -8,7 +9,8 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
-  IsObject,
+  IsBoolean,
+  ValidateNested,
 } from 'class-validator';
 
 export enum ManagerGender {
@@ -19,27 +21,41 @@ export enum ManagerGender {
 
 export class ManagerPermissionsDto {
   @ApiProperty({ default: true })
-  manageClients!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  manageClients?: boolean;
 
   @ApiProperty({ default: true })
-  manageReceipts!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  manageReceipts?: boolean;
 
   @ApiProperty({ default: true })
-  viewReports!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  viewReports?: boolean;
 
   @ApiProperty({ default: true })
-  approveDeposit!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  approveDeposit?: boolean;
 }
 
 export class ManagerNotificationPrefsDto {
   @ApiProperty({ default: true })
-  email!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  email?: boolean;
 
   @ApiProperty({ default: true })
-  sms!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  sms?: boolean;
 
   @ApiProperty({ default: true })
-  inApp!: boolean;
+  @IsOptional()
+  @IsBoolean()
+  inApp?: boolean;
 }
 
 export class PersonalInfoDto {
@@ -97,21 +113,28 @@ export class PersonalInfoDto {
 export class AccountSetupDto {
   @ApiProperty({ type: ManagerPermissionsDto, required: false })
   @IsOptional()
-  @IsObject()
+  @ValidateNested()
+  @Type(() => ManagerPermissionsDto)
   permissions?: ManagerPermissionsDto;
 
   @ApiProperty({ type: ManagerNotificationPrefsDto, required: false })
   @IsOptional()
-  @IsObject()
+  @ValidateNested()
+  @Type(() => ManagerNotificationPrefsDto)
   notificationPrefs?: ManagerNotificationPrefsDto;
 }
 
 export class CreateManagerDto {
   @ApiProperty({ type: PersonalInfoDto })
+  @IsNotEmpty()
+  @ValidateNested()
+  @Type(() => PersonalInfoDto)
   personalInfo!: PersonalInfoDto;
 
   @ApiProperty({ type: AccountSetupDto, required: false })
   @IsOptional()
+  @ValidateNested()
+  @Type(() => AccountSetupDto)
   accountSetup?: AccountSetupDto;
 
   @ApiProperty({
@@ -128,10 +151,14 @@ export class CreateManagerDto {
 export class UpdateManagerDto {
   @ApiProperty({ type: PersonalInfoDto, required: false })
   @IsOptional()
+  @ValidateNested()
+  @Type(() => PersonalInfoDto)
   personalInfo?: Partial<PersonalInfoDto>;
 
   @ApiProperty({ type: AccountSetupDto, required: false })
   @IsOptional()
+  @ValidateNested()
+  @Type(() => AccountSetupDto)
   accountSetup?: AccountSetupDto;
 }
 
