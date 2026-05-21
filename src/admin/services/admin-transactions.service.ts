@@ -1,9 +1,22 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { WarehouseManagerService } from '../../warehouse-manager/warehouse-manager.service';
 
+/**
+ * Tenant-admin transaction reports. Delegates to the single canonical
+ * collector (`WarehouseManagerService.listTransactions`) so admins and
+ * managers share one definition of "a transaction" — no parallel
+ * implementations, no drift.
+ *
+ * Admins (whScope = null) get the full tenant view; managers calling the WM
+ * endpoint get their warehouse-scoped view. Same data shape on both.
+ */
 @Injectable()
 export class AdminTransactionsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private wm: WarehouseManagerService,
+  ) {}
 
   async getTransactions(
     tenantId: string,
@@ -17,98 +30,15 @@ export class AdminTransactionsService {
       limit?: string;
     },
   ) {
-    const page = parseInt(query.page || '1', 10);
-    const limit = Math.min(parseInt(query.limit || '20', 10), 100);
-    const skip = (page - 1) * limit;
-
-    const dateFilter: any = {};
-    if (query.from) dateFilter.gte = new Date(query.from);
-    if (query.to) dateFilter.lte = new Date(query.to);
-
-    const results: any[] = [];
-
-    if (!query.type || query.type === 'WITHDRAWAL') {
-      const where: any = { tenantId };
-      if (query.clientId) where.clientId = query.clientId;
-      if (query.warehouseId) where.receipt = { warehouseId: query.warehouseId };
-      if (Object.keys(dateFilter).length) where.createdAt = dateFilter;
-
-      const items = await this.prisma.withdrawal.findMany({
-        where,
-        include: {
-          receipt: {
-            include: {
-              warehouse: { select: { id: true, name: true } },
-              commodity: {
-                select: { id: true, name: true, unitOfMeasure: true },
-              },
-            },
-          },
-          client: { select: { id: true, firstName: true, lastName: true } },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      results.push(...items.map((i) => ({ ...i, type: 'WITHDRAWAL' })));
-    }
-
-    if (!query.type || query.type === 'LOAN') {
-      const where: any = { tenantId };
-      if (query.clientId) where.clientId = query.clientId;
-      if (Object.keys(dateFilter).length) where.createdAt = dateFilter;
-
-      const items = await this.prisma.loan.findMany({
-        where,
-        include: {
-          receipt: {
-            include: {
-              warehouse: { select: { id: true, name: true } },
-            },
-          },
-          client: { select: { id: true, firstName: true, lastName: true } },
-          financier: true,
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      results.push(...items.map((i) => ({ ...i, type: 'LOAN' })));
-    }
-
-    if (!query.type || query.type === 'TRADE') {
-      const where: any = { tenantId };
-      if (query.clientId) where.sellerId = query.clientId;
-      if (Object.keys(dateFilter).length) where.createdAt = dateFilter;
-
-      const items = await this.prisma.trade.findMany({
-        where,
-        include: {
-          receipt: {
-            include: {
-              warehouse: { select: { id: true, name: true } },
-              commodity: {
-                select: { id: true, name: true, unitOfMeasure: true },
-              },
-            },
-          },
-          seller: { select: { id: true, firstName: true, lastName: true } },
-          buyer: { select: { id: true, firstName: true, lastName: true } },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      results.push(...items.map((i) => ({ ...i, type: 'TRADE' })));
-    }
-
-    // Sort combined results by createdAt desc
-    results.sort(
-      (a, b) =>
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
-
-    const total = results.length;
-    const paginated = results.slice(skip, skip + limit);
-
-    return {
-      data: paginated,
-      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
-    };
+    return this.wm.listTransactions(tenantId, {
+      type: query.type,
+      clientId: query.clientId,
+      warehouseId: query.warehouseId,
+      fromDate: query.from,
+      toDate: query.to,
+      page: query.page,
+      limit: query.limit,
+    });
   }
 
   async exportTransactions(
@@ -128,7 +58,18 @@ export class AdminTransactionsService {
     });
 
     if (query.format === 'csv') {
-      const headers = ['id', 'type', 'status', 'createdAt'];
+      const headers = [
+        'id',
+        'type',
+        'reference',
+        'status',
+        'clientName',
+        'commodity',
+        'quantity',
+        'receiptNumber',
+        'warehouseId',
+        'date',
+      ];
       const rows = data.map((row: any) =>
         headers.map((h) => JSON.stringify(row[h] ?? '')).join(','),
       );

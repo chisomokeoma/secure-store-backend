@@ -1,12 +1,11 @@
-import { IsString, IsNumber, IsPositive } from 'class-validator';
+import { IsString } from 'class-validator';
 
+// Reworked flow: clients do NOT set trade terms here — they just push the
+// selected receipt to the exchange. Pricing is fully exchange-driven and
+// arrives via the (deferred) settlement webhook. Payload is just the receipt.
 export class CreateTradeDto {
   @IsString()
   receiptId!: string;
-
-  @IsNumber()
-  @IsPositive()
-  pricePerUnit!: number;
 }
 
 export class SettleTradeDto {

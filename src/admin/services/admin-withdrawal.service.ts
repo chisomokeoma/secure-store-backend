@@ -1,64 +1,37 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { WithdrawalsService } from '../../withdrawals/withdrawals.service';
 import { WithdrawalStatus } from '@prisma/client';
 
+/**
+ * Tenant-admin approve/reject of withdrawals. Delegates to the ledger-wired
+ * WithdrawalsService so the receipt tree (HELD_WITHDRAWAL → ACTIVE / consumed)
+ * AND the InventoryEvent log stay in sync — no more silent drift between
+ * withdrawal.status and the tree.
+ */
 @Injectable()
 export class AdminWithdrawalService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private withdrawals: WithdrawalsService,
+  ) {}
 
-  async approveWithdrawal(
-    tenantId: string,
-    withdrawalId: string,
-    adminId: string,
-  ) {
-    return this.prisma.$transaction(async (tx) => {
-      const withdrawal = await tx.withdrawal.findFirst({
-        where: { id: withdrawalId, tenantId },
-      });
-      if (!withdrawal) throw new NotFoundException('Withdrawal not found');
-      if (withdrawal.status !== WithdrawalStatus.PAID_PENDING_APPROVAL) {
-        throw new BadRequestException(
-          `Withdrawal is not awaiting approval (status: ${withdrawal.status})`,
-        );
-      }
-
-      return tx.withdrawal.update({
-        where: { id: withdrawalId },
-        data: {
-          status: WithdrawalStatus.APPROVED,
-          approvedById: adminId,
-          approvedAt: new Date(),
-        },
-      });
-    });
+  approveWithdrawal(tenantId: string, withdrawalId: string, adminId: string) {
+    return this.withdrawals.approveWithdrawal(tenantId, withdrawalId, adminId);
   }
 
-  async rejectWithdrawal(
+  rejectWithdrawal(
     tenantId: string,
     withdrawalId: string,
     adminId: string,
     reason: string,
   ) {
-    return this.prisma.$transaction(async (tx) => {
-      const withdrawal = await tx.withdrawal.findFirst({
-        where: { id: withdrawalId, tenantId },
-      });
-      if (!withdrawal) throw new NotFoundException('Withdrawal not found');
-
-      return tx.withdrawal.update({
-        where: { id: withdrawalId },
-        data: {
-          status: WithdrawalStatus.REJECTED,
-          rejectionReason: reason,
-          approvedById: adminId,
-          approvedAt: new Date(),
-        },
-      });
-    });
+    return this.withdrawals.rejectWithdrawal(
+      tenantId,
+      withdrawalId,
+      adminId,
+      reason,
+    );
   }
 
   async getPendingWithdrawals(tenantId: string) {

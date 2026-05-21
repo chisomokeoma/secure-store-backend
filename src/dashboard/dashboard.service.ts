@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { WarehouseManagerService } from '../warehouse-manager/warehouse-manager.service';
 import {
   ReceiptStatus,
   WithdrawalStatus,
@@ -10,9 +11,24 @@ import { ActivityType, RecentActivityDto } from './dto/dashboard.dto';
 
 @Injectable()
 export class DashboardService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private wm: WarehouseManagerService,
+  ) {}
 
+  /**
+   * Tenant-admin dashboard summary. Delegates to the WM dashboard so admins
+   * and managers share a single source of truth for the cards / overview /
+   * distribution. Admins (whScope = null) get the full tenant view; managers
+   * get their warehouse-scoped view.
+   */
   async getSummary(tenantId: string) {
+    return this.wm.getDashboard(tenantId);
+  }
+
+  // The original tenant-admin summary impl, kept under a different name in
+  // case anything still depends on its exact shape during integration.
+  private async _legacyGetSummary(tenantId: string) {
     const twoMonthsAgo = new Date();
     twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
 
@@ -45,17 +61,17 @@ export class DashboardService {
         },
       }),
       this.prisma.receipt.aggregate({
-        where: { tenantId, status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] } },
-        _sum: { quantityAvailable: true },
+        where: { tenantId, status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] } },
+        _sum: { quantity: true },
       }),
       // --- Deltas ---
       this.prisma.receipt.aggregate({
         where: {
           tenantId,
-          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+          status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
           createdAt: { gte: twoMonthsAgo },
         },
-        _sum: { quantityAvailable: true },
+        _sum: { quantity: true },
       }),
       this.prisma.withdrawal.count({
         where: { tenantId, status: WithdrawalStatus.PAID_PENDING_APPROVAL },
@@ -74,8 +90,8 @@ export class DashboardService {
       warehousesDelta,
       totalClients: clients,
       clientsDelta,
-      totalCommodity: commodityResult._sum.quantityAvailable || 0,
-      commodityDelta: commodityDeltaResult._sum.quantityAvailable || 0,
+      totalCommodity: commodityResult._sum?.quantity ?? 0,
+      commodityDelta: commodityDeltaResult._sum?.quantity ?? 0,
       pendingRequests,
       pendingRequestsDelta,
     };
@@ -86,9 +102,9 @@ export class DashboardService {
       by: ['commodityId'],
       where: {
         tenantId,
-        status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+        status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
       },
-      _sum: { quantityAvailable: true },
+      _sum: { quantity: true },
     });
 
     const commodities = await this.prisma.commodity.findMany({
@@ -97,7 +113,7 @@ export class DashboardService {
 
     return breakdown.map((b) => ({
       name: commodities.find((c) => c.id === b.commodityId)?.name || 'Unknown',
-      quantity: b._sum.quantityAvailable || 0,
+      quantity: b._sum?.quantity ?? 0,
     }));
   }
 
@@ -139,7 +155,7 @@ export class DashboardService {
     receipts.forEach((r) => {
       const date = r.createdAt.toISOString().split('T')[0];
       const entry = dataMap.get(date) || { deposits: 0, withdrawals: 0 };
-      entry.deposits += r.quantity;
+      entry.deposits += Number(r.quantity);
       dataMap.set(date, entry);
     });
 
@@ -254,9 +270,9 @@ export class DashboardService {
         where: {
           tenantId,
           clientId,
-          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+          status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
         },
-        _sum: { quantityAvailable: true },
+        _sum: { quantity: true },
       }),
       this.prisma.loan.findMany({
         where: { tenantId, clientId, status: LoanStatus.ACTIVE },
@@ -276,7 +292,7 @@ export class DashboardService {
         email: client.email,
       },
       summary: {
-        totalStock: stock._sum.quantityAvailable || 0,
+        totalStock: stock._sum?.quantity ?? 0,
         activeLoansCount: loans.length,
         totalLoanAmount: loans.reduce((sum, l) => sum + l.amount, 0),
       },
@@ -303,18 +319,18 @@ export class DashboardService {
         where: {
           tenantId,
           commodityId,
-          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+          status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
         },
-        _sum: { quantityAvailable: true },
+        _sum: { quantity: true },
       }),
       this.prisma.receipt.groupBy({
         by: ['grade'],
         where: {
           tenantId,
           commodityId,
-          status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+          status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
         },
-        _sum: { quantityAvailable: true },
+        _sum: { quantity: true },
       }),
     ]);
 
@@ -331,11 +347,11 @@ export class DashboardService {
       distributionByWarehouse: stockByWarehouse.map((s) => ({
         warehouse:
           warehouses.find((w) => w.id === s.warehouseId)?.name || 'Unknown',
-        quantity: s._sum.quantityAvailable || 0,
+        quantity: s._sum?.quantity ?? 0,
       })),
       distributionByGrade: stockByGrade.map((s) => ({
         grade: s.grade || 'Ungraded',
-        quantity: s._sum.quantityAvailable || 0,
+        quantity: s._sum?.quantity ?? 0,
       })),
     };
   }

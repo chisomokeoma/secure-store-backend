@@ -10,10 +10,10 @@ export class AdminReportService {
       by: ['commodityId', 'warehouseId'],
       where: {
         tenantId,
-        status: { in: ['ACTIVE', 'PLEDGED', 'LIEN'] },
+        status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
       },
       _sum: {
-        quantityAvailable: true,
+        quantity: true,
       },
     });
 
@@ -28,7 +28,7 @@ export class AdminReportService {
     return stocks.map((s) => ({
       commodity: commodities.find((c) => c.id === s.commodityId)?.name,
       warehouse: warehouses.find((w) => w.id === s.warehouseId)?.name,
-      totalQuantity: s._sum.quantityAvailable || 0,
+      totalQuantity: Number(s._sum?.quantity ?? 0),
     }));
   }
 
@@ -52,10 +52,10 @@ export class AdminReportService {
       const diffTime = Math.abs(now.getTime() - r.dateOfDeposit.getTime());
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-      if (diffDays <= 30) categories['0-30 days'] += r.quantityAvailable;
-      else if (diffDays <= 60) categories['31-60 days'] += r.quantityAvailable;
-      else if (diffDays <= 90) categories['61-90 days'] += r.quantityAvailable;
-      else categories['90+ days'] += r.quantityAvailable;
+      if (diffDays <= 30) categories['0-30 days'] += Number(r.quantity);
+      else if (diffDays <= 60) categories['31-60 days'] += Number(r.quantity);
+      else if (diffDays <= 90) categories['61-90 days'] += Number(r.quantity);
+      else categories['90+ days'] += Number(r.quantity);
     });
 
     return Object.entries(categories).map(([range, quantity]) => ({

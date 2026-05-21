@@ -9,6 +9,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import 'dotenv/config';
 import * as bcrypt from 'bcrypt';
+import { randomUUID } from 'node:crypto';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL as string,
@@ -339,35 +340,57 @@ async function main() {
       const commId = getComm(r.comm);
 
       if (whId && commId) {
-        const isLocked = (
-          [ReceiptStatus.PLEDGED, ReceiptStatus.LIEN] as ReceiptStatus[]
-        ).includes(r.status);
         
         // Distribute over last 6 months
         const monthsAgo = Math.floor(Math.random() * 6);
         const createdAt = new Date();
         createdAt.setMonth(createdAt.getMonth() - monthsAgo);
 
-        await prisma.receipt.upsert({
+        // Single-node tree root (ACTIVE + APPROVED so it's usable for
+        // testing), with a genesis DEPOSIT event. Idempotent by number.
+        const existing = await prisma.receipt.findUnique({
           where: { receiptNumber: r.num },
-          update: {
-            tenantId: tenant.id,
-          },
-          create: {
-            receiptNumber: r.num,
-            commodityId: commId,
-            warehouseId: whId,
-            clientId: demoUser.id,
-            quantity: r.qty,
-            quantityAvailable: isLocked ? 0 : r.qty,
-            grade: r.grade,
-            status: r.status,
-            dateOfDeposit: new Date('2025-01-01T00:00:00Z'),
-            expiryDate: new Date('2026-01-01T00:00:00Z'),
-            tenantId: tenant.id,
-            createdAt: createdAt,
-          },
         });
+        if (!existing) {
+          const id = randomUUID();
+          await prisma.receipt.create({
+            data: {
+              id,
+              receiptNumber: r.num,
+              commodityId: commId,
+              warehouseId: whId,
+              clientId: demoUser.id,
+              quantity: r.qty,
+              grade: r.grade,
+              status: r.status,
+              approvalStatus: 'APPROVED',
+              rootReceiptId: id,
+              isParent: false,
+              sourceTxnType: 'DEPOSIT',
+              dateOfDeposit: new Date('2025-01-01T00:00:00Z'),
+              expiryDate: new Date('2026-01-01T00:00:00Z'),
+              tenantId: tenant.id,
+              createdAt: createdAt,
+            },
+          });
+          const ev = await prisma.inventoryEvent.create({
+            data: {
+              tenantId: tenant.id,
+              rootReceiptId: id,
+              fromReceiptId: id,
+              eventType: 'DEPOSIT',
+              txnType: 'DEPOSIT',
+              quantity: r.qty,
+              idempotencyKey: `seed:deposit:${r.num}`,
+              metadata: { seed: true },
+              occurredAt: createdAt,
+            },
+          });
+          await prisma.receipt.update({
+            where: { id },
+            data: { sourceEventId: ev.id },
+          });
+        }
       }
     }
 

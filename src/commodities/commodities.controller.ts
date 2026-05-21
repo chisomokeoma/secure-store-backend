@@ -42,20 +42,28 @@ export class CommoditiesController {
   }
 
   @Get(':id/receipts')
-  @ApiOperation({ summary: 'Get receipts linked to a commodity' })
+  @ApiOperation({
+    summary:
+      "Caller's receipts for a commodity (client-scoped — never returns other clients' receipts).",
+  })
   @ApiParam({ name: 'id' })
-  @ApiQuery({ name: 'view', required: false })
   @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
   @ApiQuery({ name: 'search', required: false })
   @ApiResponse({ status: 200, description: 'Paginated list of receipts' })
   getCommodityReceipts(
     @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
     @Param('id') id: string,
-    @Query('view') view?: string,
     @Query('page') page?: string,
+    @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
-    return this.commoditiesService.getCommodityReceipts(tenantId, id);
+    return this.commoditiesService.getCommodityReceipts(tenantId, id, userId, {
+      page,
+      limit,
+      search,
+    });
   }
 
   @Get(':id/export')

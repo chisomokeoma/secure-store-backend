@@ -3,13 +3,20 @@ import {
   BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { LoanStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReceiptStatus, LoanStatus } from '@prisma/client';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CalculateLoanDto, CreateLoanDto } from './dto/loans.dto';
 
 @Injectable()
 export class LoansService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private ledger: InventoryLedgerService,
+    private notifications: NotificationsService,
+  ) {}
 
   async getFinanciers(tenantId: string) {
     return this.prisma.financier.findMany({
@@ -25,17 +32,21 @@ export class LoansService {
     });
   }
 
+  /** Only APPROVED, ACTIVE leaves can be pledged. */
   async getPledgeableReceipts(
     tenantId: string,
     clientId: string,
     commodity?: string,
+    warehouseIds?: string[],
   ) {
     const receipts = await this.prisma.receipt.findMany({
       where: {
         tenantId,
-        clientId: clientId,
-        status: ReceiptStatus.ACTIVE,
-        quantityAvailable: { gt: 0 },
+        clientId,
+        status: 'ACTIVE',
+        approvalStatus: 'APPROVED',
+        isParent: false,
+        ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
       },
       include: { commodity: true },
     });
@@ -49,7 +60,7 @@ export class LoansService {
       .map((r) => ({
         id: r.id,
         receiptNumber: r.receiptNumber,
-        availableQuantity: r.quantityAvailable,
+        availableQuantity: Number(r.quantity),
         commodity: r.commodity.name,
       }));
   }
@@ -62,11 +73,9 @@ export class LoansService {
     if (dto.amount <= 0) {
       throw new BadRequestException('Loan amount must be greater than zero');
     }
-
     const tenureMonths = financier.maxTenure;
     const totalInterest = (dto.amount * financier.interestRate) / 100;
     const monthlyPayment = (dto.amount + totalInterest) / tenureMonths;
-
     return {
       totalInterest,
       monthlyPayment,
@@ -75,172 +84,199 @@ export class LoansService {
     };
   }
 
-  async createLoan(tenantId: string, dto: CreateLoanDto, clientId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const receipt = await tx.receipt.findFirst({
-        where: { id: dto.receiptId, tenantId },
-      });
-      if (!receipt) throw new NotFoundException('Receipt not found');
-      if (receipt.status !== ReceiptStatus.ACTIVE) {
-        throw new BadRequestException(
-          `Receipt is not active and cannot be pledged (status: ${receipt.status})`,
-        );
-      }
-      if (receipt.quantityAvailable <= 0) {
-        throw new BadRequestException('Receipt has no available quantity');
-      }
-
-      const financier = await tx.financier.findFirst({
-        where: { id: dto.financierId, tenantId },
-      });
-      if (!financier) throw new NotFoundException('Financier not found');
-
-      const tenureMonths = financier.maxTenure;
-      const totalInterest = (dto.amount * financier.interestRate) / 100;
-      const monthlyPayment = (dto.amount + totalInterest) / tenureMonths;
-
-      // Pledge the receipt — locks it from withdrawal/trade
-      await tx.receipt.update({
-        where: { id: receipt.id },
-        data: {
-          status: ReceiptStatus.PLEDGED,
-          quantityAvailable: 0,
-        },
-      });
-
-      const loan = await tx.loan.create({
-        data: {
-          reference: `L-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          receiptId: receipt.id,
-          clientId: clientId,
-          tenantId: tenantId,
-          financierId: financier.id,
-          amount: dto.amount,
-          interestRate: financier.interestRate,
-          tenureMonths,
-          totalInterest,
-          monthlyPayment,
-          status: LoanStatus.PENDING,
-          notes: dto.notes,
-        },
-      });
-
-      return {
-        id: loan.id,
-        reference: loan.reference,
-        status: loan.status,
-        amount: loan.amount,
-        totalInterest: loan.totalInterest,
-        monthlyPayment: loan.monthlyPayment,
-        tenureMonths: loan.tenureMonths,
-        pledgedReceipt: receipt.receiptNumber,
-      };
+  /** Create = pledge the whole selected receipt as collateral (HOLD_LOAN). */
+  async createLoan(
+    tenantId: string,
+    dto: CreateLoanDto,
+    clientId: string,
+    actorUserId?: string,
+  ) {
+    const receipt = await this.prisma.receipt.findFirst({
+      where: { id: dto.receiptId, tenantId },
     });
+    if (!receipt) throw new NotFoundException('Receipt not found');
+
+    const financier = await this.prisma.financier.findFirst({
+      where: { id: dto.financierId, tenantId },
+    });
+    if (!financier) throw new NotFoundException('Financier not found');
+    if (dto.amount <= 0) {
+      throw new BadRequestException('Loan amount must be greater than zero');
+    }
+
+    const tenureMonths = financier.maxTenure;
+    const totalInterest = (dto.amount * financier.interestRate) / 100;
+    const monthlyPayment = (dto.amount + totalInterest) / tenureMonths;
+
+    const loanId = randomUUID();
+    const { held } = await this.ledger.hold({
+      tenantId,
+      sourceReceiptId: receipt.id,
+      quantity: receipt.quantity,
+      heldStatus: 'HELD_LOAN',
+      txnType: 'LOAN',
+      txnId: loanId,
+      actorUserId: actorUserId ?? clientId,
+      idempotencyKey: `LOAN:${loanId}:hold`,
+    });
+
+    const loan = await this.prisma.loan.upsert({
+      where: { id: loanId },
+      update: {},
+      create: {
+        id: loanId,
+        reference: `L-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        receiptId: held.id,
+        clientId,
+        tenantId,
+        financierId: financier.id,
+        amount: dto.amount,
+        interestRate: financier.interestRate,
+        tenureMonths,
+        totalInterest,
+        monthlyPayment,
+        status: LoanStatus.PENDING,
+        notes: dto.notes,
+      },
+    });
+
+    void this.notifications.notifyTenantAdmins(tenantId, {
+      type: 'LOAN_REQUESTED',
+      title: 'New loan request',
+      body: `${loan.reference}: ₦${dto.amount.toLocaleString()} via ${financier.name}.`,
+      relatedEntityType: 'loan',
+      relatedEntityId: loan.id,
+      data: {
+        amount: dto.amount,
+        financierId: financier.id,
+        financierName: financier.name,
+      },
+    });
+    void this.notifications.notifyUser(clientId, {
+      tenantId,
+      type: 'LOAN_REQUESTED',
+      title: 'Loan request submitted',
+      body: `${loan.reference}: ₦${dto.amount.toLocaleString()} via ${financier.name}. Awaiting approval.`,
+      relatedEntityType: 'loan',
+      relatedEntityId: loan.id,
+    });
+
+    return {
+      id: loan.id,
+      reference: loan.reference,
+      status: loan.status,
+      amount: loan.amount,
+      totalInterest: loan.totalInterest,
+      monthlyPayment: loan.monthlyPayment,
+      tenureMonths: loan.tenureMonths,
+      pledgedReceiptId: held.id,
+    };
   }
 
-  async approveLoan(tenantId: string, loanId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const loan = await tx.loan.findFirst({
-        where: { id: loanId, tenantId },
-      });
-      if (!loan) throw new NotFoundException('Loan not found');
-      if (loan.status !== LoanStatus.PENDING) {
-        throw new BadRequestException(
-          `Loan is not pending (status: ${loan.status})`,
-        );
-      }
-
-      const updated = await tx.loan.update({
-        where: { id: loanId },
-        data: { status: LoanStatus.ACTIVE, approvedAt: new Date() },
-      });
-
-      return { id: updated.id, status: updated.status };
-    });
+  private async loadLoan(tenantId: string, id: string) {
+    const loan = await this.prisma.loan.findFirst({ where: { id, tenantId } });
+    if (!loan) throw new NotFoundException('Loan not found');
+    return loan;
   }
 
-  async rejectLoan(tenantId: string, loanId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const loan = await tx.loan.findFirst({
-        where: { id: loanId, tenantId },
-      });
-      if (!loan) throw new NotFoundException('Loan not found');
-      if (loan.status !== LoanStatus.PENDING) {
-        throw new BadRequestException(
-          `Loan is not pending (status: ${loan.status})`,
-        );
-      }
-
-      // Restore the pledged receipt to ACTIVE
-      await tx.receipt.update({
-        where: { id: loan.receiptId },
-        data: {
-          status: ReceiptStatus.ACTIVE,
-          quantityAvailable: { set: 0 },
-        },
-      });
-
-      const receipt = await tx.receipt.findUnique({
-        where: { id: loan.receiptId },
-      });
-      if (receipt) {
-        await tx.receipt.update({
-          where: { id: receipt.id },
-          data: { quantityAvailable: receipt.quantity },
-        });
-      }
-
-      const updated = await tx.loan.update({
-        where: { id: loanId },
-        data: { status: LoanStatus.REJECTED },
-      });
-
-      return { id: updated.id, status: updated.status };
+  async approveLoan(tenantId: string, loanId: string, actorUserId?: string) {
+    const loan = await this.loadLoan(tenantId, loanId);
+    if (loan.status !== LoanStatus.PENDING) {
+      throw new BadRequestException(`Loan is not pending (status: ${loan.status})`);
+    }
+    await this.ledger.approveHold({
+      tenantId,
+      heldReceiptId: loan.receiptId,
+      actorUserId,
+      idempotencyKey: `LOAN:${loan.id}:approveHold`,
     });
+    const updated = await this.prisma.loan.update({
+      where: { id: loanId },
+      data: { status: LoanStatus.ACTIVE, approvedAt: new Date() },
+    });
+    void this.notifications.notifyUser(loan.clientId, {
+      tenantId,
+      type: 'LOAN_APPROVED',
+      title: 'Loan approved',
+      body: `${updated.reference}: ₦${loan.amount.toLocaleString()} is now active.`,
+      relatedEntityType: 'loan',
+      relatedEntityId: updated.id,
+    });
+    return { id: updated.id, status: updated.status };
   }
 
-  async repayLoan(tenantId: string, loanId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const loan = await tx.loan.findFirst({
-        where: { id: loanId, tenantId },
-        include: { receipt: true },
-      });
-      if (!loan) throw new NotFoundException('Loan not found');
-      if (loan.status !== LoanStatus.ACTIVE) {
-        throw new BadRequestException(
-          `Loan is not active (status: ${loan.status})`,
-        );
-      }
-
-      // Release the pledged receipt
-      await tx.receipt.update({
-        where: { id: loan.receipt.id },
-        data: {
-          status: ReceiptStatus.ACTIVE,
-          quantityAvailable: loan.receipt.quantity,
-        },
-      });
-
-      const updated = await tx.loan.update({
-        where: { id: loanId },
-        data: { status: LoanStatus.REPAID, repaidAt: new Date() },
-      });
-
-      return {
-        id: updated.id,
-        status: updated.status,
-        releasedReceipt: loan.receipt.receiptNumber,
-      };
+  async rejectLoan(tenantId: string, loanId: string, actorUserId?: string) {
+    const loan = await this.loadLoan(tenantId, loanId);
+    if (loan.status !== LoanStatus.PENDING) {
+      throw new BadRequestException(`Loan is not pending (status: ${loan.status})`);
+    }
+    await this.ledger.release({
+      tenantId,
+      heldReceiptId: loan.receiptId,
+      actorUserId,
+      idempotencyKey: `LOAN:${loan.id}:release`,
     });
+    const updated = await this.prisma.loan.update({
+      where: { id: loanId },
+      data: { status: LoanStatus.REJECTED },
+    });
+    void this.notifications.notifyUser(loan.clientId, {
+      tenantId,
+      type: 'LOAN_REJECTED',
+      title: 'Loan rejected',
+      body: `${updated.reference} was rejected.`,
+      relatedEntityType: 'loan',
+      relatedEntityId: updated.id,
+    });
+    return { id: updated.id, status: updated.status };
   }
 
-  async getLoanDetail(tenantId: string, id: string) {
+  async repayLoan(tenantId: string, loanId: string, actorUserId?: string) {
+    const loan = await this.loadLoan(tenantId, loanId);
+    if (loan.status !== LoanStatus.ACTIVE) {
+      throw new BadRequestException(`Loan is not active (status: ${loan.status})`);
+    }
+    const released = await this.ledger.release({
+      tenantId,
+      heldReceiptId: loan.receiptId,
+      actorUserId,
+      idempotencyKey: `LOAN:${loan.id}:repay-release`,
+    });
+    const updated = await this.prisma.loan.update({
+      where: { id: loanId },
+      data: { status: LoanStatus.REPAID, repaidAt: new Date() },
+    });
+    void this.notifications.notifyUser(loan.clientId, {
+      tenantId,
+      type: 'LOAN_REPAID',
+      title: 'Loan repaid',
+      body: `${updated.reference} is repaid. Collateral released.`,
+      relatedEntityType: 'loan',
+      relatedEntityId: updated.id,
+    });
+    void this.notifications.notifyTenantAdmins(tenantId, {
+      type: 'LOAN_REPAID',
+      title: 'Loan repaid',
+      body: `${updated.reference}: repaid; collateral released.`,
+      relatedEntityType: 'loan',
+      relatedEntityId: updated.id,
+    });
+    return {
+      id: updated.id,
+      status: updated.status,
+      releasedReceipt: released.receiptNumber,
+    };
+  }
+
+  async getLoanDetail(tenantId: string, id: string, forClientId?: string) {
     const loan = await this.prisma.loan.findFirst({
-      where: { id, tenantId },
+      where: {
+        id,
+        tenantId,
+        ...(forClientId ? { clientId: forClientId } : {}),
+      },
       include: {
-        receipt: {
-          include: { commodity: true, warehouse: true },
-        },
+        receipt: { include: { commodity: true, warehouse: true } },
         financier: true,
         client: {
           select: { id: true, firstName: true, lastName: true, email: true },

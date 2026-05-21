@@ -20,7 +20,12 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "prisma:migrate": "prisma migrate dev --schema=./prisma/schema.prisma",
     "prisma:reset": "prisma migrate reset --schema=./prisma/schema.prisma",
-    "prisma:generate": "prisma generate --schema=./prisma/schema.prisma"
+    "prisma:generate": "prisma generate --schema=./prisma/schema.prisma",
+    "phase1:diagnose": "ts-node prisma/backfill/diagnose-db.ts",
+    "phase1:backfill": "ts-node prisma/backfill/phase1-backfill.ts",
+    "phase1:verify": "ts-node prisma/backfill/phase1-verify.ts",
+    "test:inventory": "jest src/inventory",
+    "test:inventory:e2e": "jest --config ./test/jest-e2e.json test/inventory"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
