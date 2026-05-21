@@ -6,8 +6,9 @@ import {
   Body,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import {
   UpdateProfileDto,
@@ -15,8 +16,12 @@ import {
   UserPreferencesDto,
 } from './dto/users.dto';
 import { UserProfileDto, BaseResponseDto } from '../auth/dto/auth.dto';
+import { JwtAuthGuard } from '../auth/jwt.guard';
+import { CurrentUser } from '../common/decorators/user.decorator';
 
 @ApiTags('User Settings')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
@@ -24,36 +29,46 @@ export class UsersController {
   @Get('me')
   @ApiOperation({ summary: 'Get current user profile' })
   @ApiResponse({ status: 200, type: UserProfileDto })
-  getMe() {
-    return this.usersService.getMe();
+  getMe(@CurrentUser('id') userId: string) {
+    return this.usersService.getMe(userId);
   }
 
   @Patch('me')
   @ApiOperation({ summary: 'Update user profile' })
   @ApiResponse({ status: 200, type: UserProfileDto })
-  updateMe(@Body() body: UpdateProfileDto) {
-    return this.usersService.updateMe(body);
+  updateMe(@CurrentUser('id') userId: string, @Body() body: UpdateProfileDto) {
+    return this.usersService.updateMe(body, userId);
   }
 
   @Post('me/change-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Change user password' })
   @ApiResponse({ status: 200, type: BaseResponseDto })
-  changePassword(@Body() body: ChangePasswordDto) {
-    return { success: true, message: 'Password changed successfully' };
+  changePassword(
+    @CurrentUser('id') userId: string,
+    @Body() body: ChangePasswordDto,
+  ) {
+    return this.usersService.changePassword(
+      userId,
+      body.oldPassword,
+      body.newPassword,
+    );
   }
 
   @Get('me/preferences')
   @ApiOperation({ summary: 'Get user notifications preferences' })
   @ApiResponse({ status: 200, type: UserPreferencesDto })
-  getPreferences() {
-    return { emailNotifications: true, smsNotifications: false };
+  getPreferences(@CurrentUser('id') userId: string) {
+    return this.usersService.getPreferences(userId);
   }
 
   @Patch('me/preferences')
   @ApiOperation({ summary: 'Update user preferences' })
   @ApiResponse({ status: 200, type: UserPreferencesDto })
-  updatePreferences(@Body() body: Partial<UserPreferencesDto>) {
-    return { emailNotifications: true, smsNotifications: false };
+  updatePreferences(
+    @CurrentUser('id') userId: string,
+    @Body() body: Partial<UserPreferencesDto>,
+  ) {
+    return this.usersService.updatePreferences(userId, body);
   }
 }

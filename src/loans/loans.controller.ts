@@ -27,11 +27,14 @@ import {
   LoanResponseDto,
 } from './dto/loans.dto';
 import { JwtAuthGuard } from '../auth/jwt.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
 import { CurrentUser } from '../common/decorators/user.decorator';
+import { ClientScopeId } from '../common/decorators/client-scope-id.decorator';
 
 @ApiTags('Loans')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('loans')
 export class LoansController {
   constructor(private readonly loansService: LoansService) {}
@@ -80,6 +83,7 @@ export class LoansController {
   }
 
   @Post(':id/approve')
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Approve loan — moves PENDING → ACTIVE' })
   @ApiParam({ name: 'id' })
@@ -92,6 +96,7 @@ export class LoansController {
   }
 
   @Post(':id/reject')
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Reject loan — returns pledged receipt to ACTIVE',
@@ -106,6 +111,7 @@ export class LoansController {
   }
 
   @Post(':id/repay')
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Mark loan as repaid — releases the pledged receipt',
@@ -120,13 +126,14 @@ export class LoansController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get details of a specific loan' })
+  @ApiOperation({ summary: 'Get loan details (own only if CLIENT)' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: LoanResponseDto })
   getLoanDetail(
     @CurrentUser('tenantId') tenantId: string,
+    @ClientScopeId() forClientId: string | undefined,
     @Param('id') id: string,
   ) {
-    return this.loansService.getLoanDetail(tenantId, id);
+    return this.loansService.getLoanDetail(tenantId, id, forClientId);
   }
 }

@@ -23,6 +23,10 @@ import { ManagersModule } from './managers/managers.module';
 import { GradingModule } from './grading/grading.module';
 import { StorageFeesModule } from './storage-fees/storage-fees.module';
 import { MeModule } from './me/me.module';
+import { InventoryModule } from './inventory/inventory.module';
+import { WarehouseManagerModule } from './warehouse-manager/warehouse-manager.module';
+import { ReferenceModule } from './reference/reference.module';
+import { EmailModule } from './email/email.module';
 
 @Module({
   imports: [
@@ -48,6 +52,10 @@ import { MeModule } from './me/me.module';
     GradingModule,
     StorageFeesModule,
     MeModule,
+    InventoryModule,
+    WarehouseManagerModule,
+    ReferenceModule,
+    EmailModule,
   ],
   controllers: [AppController],
   providers: [AppService],

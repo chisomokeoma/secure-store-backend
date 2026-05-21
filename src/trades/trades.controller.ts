@@ -26,17 +26,22 @@ import {
   PaginatedTradeResponseDto,
 } from './dto/trades.dto';
 import { JwtAuthGuard } from '../auth/jwt.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
 import { CurrentUser } from '../common/decorators/user.decorator';
+import { ClientScopeId } from '../common/decorators/client-scope-id.decorator';
 
 @ApiTags('Trades')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('trades')
 export class TradesController {
   constructor(private readonly tradesService: TradesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all trades with filters' })
+  @ApiOperation({
+    summary: "List trades (auto-scoped to caller's own as seller/buyer if CLIENT)",
+  })
   @ApiQuery({ name: 'status', required: false })
   @ApiQuery({ name: 'page', required: false })
   @ApiQuery({ name: 'limit', required: false })
@@ -44,17 +49,17 @@ export class TradesController {
   @ApiResponse({ status: 200, type: PaginatedTradeResponseDto })
   getTrades(
     @CurrentUser('tenantId') tenantId: string,
+    @ClientScopeId() forClientId: string | undefined,
     @Query('status') status?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
   ) {
-    return this.tradesService.getTrades(tenantId, {
-      status,
-      page,
-      limit,
-      search,
-    });
+    return this.tradesService.getTrades(
+      tenantId,
+      { status, page, limit, search },
+      forClientId,
+    );
   }
 
   @Post()
@@ -71,6 +76,7 @@ export class TradesController {
   }
 
   @Post(':id/settle')
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -87,6 +93,7 @@ export class TradesController {
   }
 
   @Post(':id/cancel')
+  @Roles('TENANT_ADMIN', 'GLOBAL_ADMIN')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Cancel a trade listing — returns receipt to ACTIVE for seller',
@@ -101,13 +108,14 @@ export class TradesController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get specific trade detail' })
+  @ApiOperation({ summary: 'Get trade detail (own only if CLIENT)' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, type: TradeListingDto })
   getTradeDetail(
     @CurrentUser('tenantId') tenantId: string,
+    @ClientScopeId() forClientId: string | undefined,
     @Param('id') id: string,
   ) {
-    return this.tradesService.getTradeDetail(tenantId, id);
+    return this.tradesService.getTradeDetail(tenantId, id, forClientId);
   }
 }

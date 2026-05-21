@@ -20,13 +20,48 @@ enum MeasurementUnit {
   LITRE
 }
 
+// Phase 1: receipt-tree-ledger refactor.
+// Node lifecycle for the immutable UTXO-style receipt tree.
 enum ReceiptStatus {
-  ACTIVE
-  CANCELLED
-  LIEN
-  PLEDGED
+  ACTIVE // live, transactable leaf
+  PENDING_APPROVAL // graded by warehouse manager, awaiting approval
+  HELD_WITHDRAWAL // reserved by an in-flight withdrawal
+  HELD_LOAN // pledged as live loan collateral
+  HELD_TRADE // listed on the exchange
+  WITHDRAWN // terminal: physically removed
+  TRADED_OUT // terminal: ownership transferred via sale
+  SEIZED // terminal: collateral taken on loan default
+  EXPIRED // terminal: lapsed
+  CANCELLED // terminal: rejected deposit / dead
+  SPLIT // superseded internal node (has children)
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TxnType {
+  DEPOSIT
+  WITHDRAWAL
+  LOAN
+  TRADE
+  ADJUSTMENT
+}
+
+enum InventoryEventType {
+  DEPOSIT
+  APPROVED
+  REJECTED
+  HOLD_PLACED
+  HOLD_RELEASED
+  CONSUMED
+  OWNERSHIP_TRANSFERRED
+  SEIZED
   EXPIRED
-  WITHDRAWN
+  CANCELLED
+  LEGACY_RECONCILIATION
 }
 
 enum WithdrawalStatus {
@@ -67,6 +102,36 @@ enum FeeType {
   FLAT_RATE
 }
 
+enum NotificationType {
+  // Client lifecycle
+  CLIENT_REGISTERED
+  CLIENT_CREDENTIALS_ISSUED
+
+  // Deposits / receipt approval
+  DEPOSIT_PENDING_APPROVAL
+  DEPOSIT_APPROVED
+  DEPOSIT_REJECTED
+
+  // Withdrawals
+  WITHDRAWAL_REQUESTED
+  WITHDRAWAL_PAYMENT_CONFIRMED
+  WITHDRAWAL_APPROVED
+  WITHDRAWAL_REJECTED
+  WITHDRAWAL_DISPATCHED
+
+  // Loans
+  LOAN_REQUESTED
+  LOAN_APPROVED
+  LOAN_REJECTED
+  LOAN_REPAID
+  LOAN_DEFAULTED
+
+  // Trades
+  TRADE_LISTED
+  TRADE_SOLD
+  TRADE_CANCELLED
+}
+
 enum BillingFrequency {
   DAILY
   WEEKLY
@@ -88,6 +153,13 @@ enum UserStatus {
   DEACTIVATED
 }
 
+enum ClientType {
+  FARMER
+  TRADER
+  COMPANY
+  OTHER
+}
+
 // ==========================================
 // MODELS
 // ==========================================
@@ -99,34 +171,38 @@ model Tenant {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  users              User[]
-  warehouses         Warehouse[]
-  commodities        Commodity[]
-  receipts           Receipt[]
-  withdrawals        Withdrawal[]
-  loans              Loan[]
-  trades             Trade[]
-  financiers         Financier[]
+  users                User[]
+  warehouses           Warehouse[]
+  commodities          Commodity[]
+  receipts             Receipt[]
+  withdrawals          Withdrawal[]
+  loans                Loan[]
+  trades               Trade[]
+  financiers           Financier[]
   warehouseCommodities WarehouseCommodity[]
-  gradingParameters  GradingParameter[]
-  storageFeePolicies StorageFeePolicy[]
-  managerAssignments WarehouseManagerAssignment[]
-  activityLogs        ActivityLog[]
+  gradingParameters    GradingParameter[]
+  storageFeePolicies   StorageFeePolicy[]
+  managerAssignments   WarehouseManagerAssignment[]
+  activityLogs         ActivityLog[]
+  inventoryEvents      InventoryEvent[]
+  clientProfiles       ClientProfile[]
+  clientFocusCommodities ClientFocusCommodity[]
+  notifications        Notification[]
 
   @@map("tenants")
 }
 
 model User {
-  id        String  @id @default(uuid())
-  email     String  @unique
+  id        String @id @default(uuid())
+  email     String @unique
   password  String
-  firstName String  @map("first_name")
-  lastName  String  @map("last_name")
-  
-  tenantId  String  @map("tenant_id")
-  tenant    Tenant  @relation(fields: [tenantId], references: [id])
-  
-  roles     UserRole[]
+  firstName String @map("first_name")
+  lastName  String @map("last_name")
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  roles UserRole[]
 
   // Profile fields from spec §1.0
   phoneNumber        String?    @map("phone_number")
@@ -145,13 +221,18 @@ model User {
   receipts            Receipt[]
   withdrawals         Withdrawal[]
   loans               Loan[]
-  tradesAsSeller      Trade[] @relation("TradeSeller")
-  tradesAsBuyer       Trade[] @relation("TradeBuyer")
+  tradesAsSeller      Trade[]                      @relation("TradeSeller")
+  tradesAsBuyer       Trade[]                      @relation("TradeBuyer")
   refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
   managerAssignments  WarehouseManagerAssignment[] @relation("ManagerAssignments")
-  approvedReceipts    Receipt[]    @relation("ReceiptApprover")
-  approvedWithdrawals Withdrawal[] @relation("WithdrawalApprover")
+  approvedReceipts    Receipt[]                    @relation("ReceiptApprover")
+  approvedWithdrawals Withdrawal[]                 @relation("WithdrawalApprover")
   activityLogs        ActivityLog[]
+  inventoryEvents     InventoryEvent[]
+  clientProfile       ClientProfile?               @relation("ClientUser")
+  registeredClients   ClientProfile[]              @relation("ClientRegistrar")
+  notifications       Notification[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -189,17 +270,17 @@ model Warehouse {
   id       String @id @default(uuid())
   name     String
   location String
-  
+
   tenantId String @map("tenant_id")
   tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   // Extended fields from spec §1.0
-  code        String?          @unique @map("code")
-  type        String?
-  state       String?
-  address     String?
-  capacityMt  Float?           @map("capacity_mt")
-  status      WarehouseStatus  @default(ACTIVE)
+  code       String?         @unique @map("code")
+  type       String?
+  state      String?
+  address    String?
+  capacityMt Float?          @map("capacity_mt")
+  status     WarehouseStatus @default(ACTIVE)
 
   receipts             Receipt[]
   warehouseCommodities WarehouseCommodity[]
@@ -219,8 +300,8 @@ model Commodity {
   description   String?
   unitOfMeasure MeasurementUnit @map("unit_of_measure")
 
-  tenantId      String          @map("tenant_id")
-  tenant        Tenant          @relation(fields: [tenantId], references: [id])
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   // Extended fields from spec §1.0
   gradingLogic        GradingLogic @default(PERCENTAGE) @map("grading_logic")
@@ -232,6 +313,7 @@ model Commodity {
   warehouseCommodities WarehouseCommodity[]
   gradingParameters    GradingParameter[]
   storageFeePolicies   StorageFeePolicy[]
+  clientFocus          ClientFocusCommodity[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -241,19 +323,19 @@ model Commodity {
 }
 
 model GradingParameter {
-  id           String    @id @default(uuid())
-  tenantId     String    @map("tenant_id")
-  tenant       Tenant    @relation(fields: [tenantId], references: [id])
-  commodityId  String    @map("commodity_id")
-  commodity    Commodity @relation(fields: [commodityId], references: [id])
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  commodityId String    @map("commodity_id")
+  commodity   Commodity @relation(fields: [commodityId], references: [id])
 
-  name         String
-  unit         String
-  isDefective  Boolean    @default(false) @map("is_defective")
-  thresholds   Json
+  name        String
+  unit        String
+  isDefective Boolean @default(false) @map("is_defective")
+  thresholds  Json
 
-  createdAt    DateTime   @default(now()) @map("created_at")
-  updatedAt    DateTime   @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@unique([commodityId, name])
   @@index([tenantId])
@@ -262,13 +344,13 @@ model GradingParameter {
 }
 
 model StorageFeePolicy {
-  id               String           @id @default(uuid())
-  tenantId         String           @map("tenant_id")
-  tenant           Tenant           @relation(fields: [tenantId], references: [id])
-  warehouseId      String?          @map("warehouse_id")
-  warehouse        Warehouse?       @relation(fields: [warehouseId], references: [id])
-  commodityId      String?          @map("commodity_id")
-  commodity        Commodity?       @relation(fields: [commodityId], references: [id])
+  id          String     @id @default(uuid())
+  tenantId    String     @map("tenant_id")
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
+  warehouseId String?    @map("warehouse_id")
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id])
+  commodityId String?    @map("commodity_id")
+  commodity   Commodity? @relation(fields: [commodityId], references: [id])
 
   feeType          FeeType          @map("fee_type")
   rate             Float
@@ -277,10 +359,10 @@ model StorageFeePolicy {
   latePenaltyPct   Float            @map("late_penalty_pct")
   currency         String           @default("NGN")
 
-  isActive         Boolean          @default(true) @map("is_active")
+  isActive Boolean @default(true) @map("is_active")
 
-  createdAt        DateTime         @default(now()) @map("created_at")
-  updatedAt        DateTime         @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([tenantId])
   @@index([warehouseId])
@@ -290,13 +372,13 @@ model StorageFeePolicy {
 }
 
 model WarehouseManagerAssignment {
-  id          String   @id @default(uuid())
-  tenantId    String   @map("tenant_id")
-  tenant      Tenant   @relation(fields: [tenantId], references: [id])
-  warehouseId String   @map("warehouse_id")
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  warehouseId String    @map("warehouse_id")
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
-  managerId   String   @map("manager_id")
-  manager     User     @relation("ManagerAssignments", fields: [managerId], references: [id])
+  managerId   String    @map("manager_id")
+  manager     User      @relation("ManagerAssignments", fields: [managerId], references: [id])
 
   assignedAt   DateTime  @default(now()) @map("assigned_at")
   assignedBy   String    @map("assigned_by")
@@ -308,19 +390,21 @@ model WarehouseManagerAssignment {
   @@map("warehouse_manager_assignments")
 }
 
+// Immutable UTXO-style node in the receipt tree.
+// `quantity` is write-once; state changes mint children + transition status.
+// A leaf's available quantity = `quantity` iff status = ACTIVE & approvalStatus = APPROVED.
 model Receipt {
   id            String        @id @default(uuid())
   receiptNumber String        @unique @map("receipt_number")
-  status        ReceiptStatus @default(ACTIVE)
-  
-  tenantId      String        @map("tenant_id")
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
+  status        ReceiptStatus @default(PENDING_APPROVAL)
 
-  commodityId       String    @map("commodity_id")
-  commodity         Commodity @relation(fields: [commodityId], references: [id])
-  quantity          Float
-  quantityAvailable Float     @map("quantity_available")
-  grade             String?
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  commodityId String    @map("commodity_id")
+  commodity   Commodity @relation(fields: [commodityId], references: [id])
+  quantity    Decimal   @db.Decimal(18, 3)
+  grade       String?
 
   warehouseId String    @map("warehouse_id")
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
@@ -328,21 +412,35 @@ model Receipt {
   clientId String @map("client_id")
   client   User   @relation(fields: [clientId], references: [id])
 
-  // Extended fields from spec §1.0
-  approvalStatus       String?   @default("PENDING") @map("approval_status")
-  approvedById         String?   @map("approved_by_id")
-  approvedBy           User?     @relation("ReceiptApprover", fields: [approvedById], references: [id])
-  approvedAt           DateTime? @map("approved_at")
-  rejectionReason      String?   @map("rejection_reason")
-  gradingScores        Json?     @map("grading_scores")
-  computedGrade        String?   @map("computed_grade")
-  totalDefectivePct    Float?    @map("total_defective_pct")
-  standardDeductionPct Float?    @map("standard_deduction_pct")
+  // Approval workflow (kept as its own field — NOT unified into status)
+  approvalStatus       ApprovalStatus @default(PENDING) @map("approval_status")
+  approvedById         String?        @map("approved_by_id")
+  approvedBy           User?          @relation("ReceiptApprover", fields: [approvedById], references: [id])
+  approvedAt           DateTime?      @map("approved_at")
+  rejectionReason      String?        @map("rejection_reason")
+  gradingScores        Json?          @map("grading_scores")
+  computedGrade        String?        @map("computed_grade")
+  totalDefectivePct    Float?         @map("total_defective_pct")
+  standardDeductionPct Float?         @map("standard_deduction_pct")
 
-  // Lineage
+  // Tree lineage
   parentReceiptId String?   @map("parent_receipt_id")
   parentReceipt   Receipt?  @relation("ReceiptLineage", fields: [parentReceiptId], references: [id])
   childReceipts   Receipt[] @relation("ReceiptLineage")
+
+  rootReceiptId String    @map("root_receipt_id")
+  rootReceipt   Receipt   @relation("ReceiptRoot", fields: [rootReceiptId], references: [id])
+  descendants   Receipt[] @relation("ReceiptRoot")
+
+  isParent     Boolean   @default(false) @map("is_parent")
+  supersededAt DateTime? @map("superseded_at")
+
+  // Provenance — the transaction + ledger event that minted this node
+  sourceTxnType TxnType?        @map("source_txn_type")
+  sourceTxnId   String?         @map("source_txn_id")
+  sourceEventId String?         @map("source_event_id")
+  sourceEvent   InventoryEvent? @relation("ReceiptSourceEvent", fields: [sourceEventId], references: [id])
+  eventsFrom    InventoryEvent[] @relation("ReceiptEventsFrom")
 
   dateOfDeposit DateTime  @map("date_of_deposit")
   expiryDate    DateTime? @map("expiry_date")
@@ -359,7 +457,118 @@ model Receipt {
   @@index([warehouseId])
   @@index([status])
   @@index([tenantId])
+  @@index([rootReceiptId])
+  @@index([parentReceiptId])
+  @@index([sourceEventId])
+  @@index([tenantId, status])
+  @@index([clientId, status, commodityId])
+  @@index([status, isParent])
   @@map("receipts")
+}
+
+// Append-only inventory ledger. Rows are NEVER updated or deleted.
+// The receipt tree is authoritative for reads; this is the audit/retrace log
+// and the source for the reconciliation / replay-verify gate.
+model InventoryEvent {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  rootReceiptId String   @map("root_receipt_id")
+  fromReceiptId String?  @map("from_receipt_id")
+  fromReceipt   Receipt? @relation("ReceiptEventsFrom", fields: [fromReceiptId], references: [id])
+
+  eventType InventoryEventType @map("event_type")
+  txnType   TxnType?           @map("txn_type")
+  txnId     String?            @map("txn_id")
+  quantity  Decimal            @db.Decimal(18, 3)
+
+  actorUserId String? @map("actor_user_id")
+  actor       User?   @relation(fields: [actorUserId], references: [id])
+
+  idempotencyKey    String?         @unique @map("idempotency_key")
+  reversalOfEventId String?         @map("reversal_of_event_id")
+  reversalOf        InventoryEvent? @relation("EventReversal", fields: [reversalOfEventId], references: [id])
+  reversedBy        InventoryEvent[] @relation("EventReversal")
+
+  createdReceipts Receipt[] @relation("ReceiptSourceEvent")
+
+  metadata   Json?
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  @@index([rootReceiptId])
+  @@index([txnType, txnId])
+  @@index([tenantId, occurredAt])
+  @@index([fromReceiptId])
+  @@map("inventory_events")
+}
+
+// Depositor KYC profile, 1:1 with a CLIENT-role User. Created by a warehouse
+// manager during client registration.
+model ClientProfile {
+  id     String @id @default(uuid())
+  userId String @unique @map("user_id")
+  user   User   @relation("ClientUser", fields: [userId], references: [id])
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  clientCode String     @unique @map("client_code")
+  type       ClientType @default(FARMER)
+  occupation String?
+  description String?
+
+  nationality   String?
+  stateOfOrigin String? @map("state_of_origin")
+  lga           String?
+  nationalId    String? @map("national_id")
+
+  // Multi-focus: a client can target several commodities. Use the
+  // `focusCommodities` join below; the legacy single-FK column is dropped
+  // in the 20260521_client_focus_commodities migration.
+  focusCommodities ClientFocusCommodity[]
+
+  profilePhotoUrl String? @map("profile_photo_url")
+  idDocumentUrl   String? @map("id_document_url")
+
+  bankAccountName   String? @map("bank_account_name")
+  bankAccountNumber String? @map("bank_account_number")
+  bankName          String? @map("bank_name")
+
+  nokFullName     String? @map("nok_full_name")
+  nokAddress      String? @map("nok_address")
+  nokPhone        String? @map("nok_phone")
+  nokEmail        String? @map("nok_email")
+  nokRelationship String? @map("nok_relationship")
+
+  registeredByManagerId String? @map("registered_by_manager_id")
+  registeredByManager   User?   @relation("ClientRegistrar", fields: [registeredByManagerId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@index([registeredByManagerId])
+  @@map("client_profiles")
+}
+
+// Many-to-many: a client can focus on several commodities, and a commodity
+// can be the focus of several clients. Composite-unique prevents duplicate
+// rows for the same (client, commodity) pair.
+model ClientFocusCommodity {
+  id              String        @id @default(uuid())
+  tenantId        String        @map("tenant_id")
+  tenant          Tenant        @relation(fields: [tenantId], references: [id])
+  clientProfileId String        @map("client_profile_id")
+  clientProfile   ClientProfile @relation(fields: [clientProfileId], references: [id], onDelete: Cascade)
+  commodityId     String        @map("commodity_id")
+  commodity       Commodity     @relation(fields: [commodityId], references: [id])
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  @@unique([clientProfileId, commodityId])
+  @@index([tenantId])
+  @@index([commodityId])
+  @@map("client_focus_commodities")
 }
 
 model Financier {
@@ -369,9 +578,9 @@ model Financier {
   minTenure    Int    @map("min_tenure")
   maxTenure    Int    @map("max_tenure")
   approvalTime String @map("approval_time")
-  
-  tenantId     String @map("tenant_id")
-  tenant       Tenant @relation(fields: [tenantId], references: [id])
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   loans Loan[]
 
@@ -387,9 +596,9 @@ model WarehouseCommodity {
   warehouseId       String @map("warehouse_id")
   commodityId       String @map("commodity_id")
   storageFeePerUnit Float  @map("storage_fee_per_unit")
-  
-  tenantId          String @map("tenant_id")
-  tenant            Tenant @relation(fields: [tenantId], references: [id])
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   warehouse Warehouse @relation(fields: [warehouseId], references: [id])
   commodity Commodity @relation(fields: [commodityId], references: [id])
@@ -405,9 +614,9 @@ model WarehouseCommodity {
 model Withdrawal {
   id        String @id @default(uuid())
   reference String @unique
-  
-  tenantId  String @map("tenant_id")
-  tenant    Tenant @relation(fields: [tenantId], references: [id])
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   receiptId String  @map("receipt_id")
   receipt   Receipt @relation(fields: [receiptId], references: [id])
@@ -423,7 +632,7 @@ model Withdrawal {
   storageFee  Float @map("storage_fee")
   handlingFee Float @map("handling_fee")
   totalFee    Float @map("total_fee")
-  
+
   // Extended fields from spec §1.0
   approvedById    String?   @map("approved_by_id")
   approvedBy      User?     @relation("WithdrawalApprover", fields: [approvedById], references: [id])
@@ -445,9 +654,9 @@ model Withdrawal {
 model Loan {
   id        String @id @default(uuid())
   reference String @unique
-  
-  tenantId  String @map("tenant_id")
-  tenant    Tenant @relation(fields: [tenantId], references: [id])
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   receiptId String  @map("receipt_id")
   receipt   Receipt @relation(fields: [receiptId], references: [id])
@@ -458,14 +667,14 @@ model Loan {
   financierId String    @map("financier_id")
   financier   Financier @relation(fields: [financierId], references: [id])
 
-  amount          Float
-  interestRate    Float      @map("interest_rate")
-  tenureMonths    Int        @map("tenure_months")
-  totalInterest   Float      @map("total_interest")
-  monthlyPayment  Float      @map("monthly_payment")
-  status          LoanStatus @default(PENDING)
-  notes           String?
-  currency        String     @default("NGN")
+  amount         Float
+  interestRate   Float      @map("interest_rate")
+  tenureMonths   Int        @map("tenure_months")
+  totalInterest  Float      @map("total_interest")
+  monthlyPayment Float      @map("monthly_payment")
+  status         LoanStatus @default(PENDING)
+  notes          String?
+  currency       String     @default("NGN")
 
   approvedAt DateTime? @map("approved_at")
   repaidAt   DateTime? @map("repaid_at")
@@ -484,9 +693,9 @@ model Loan {
 model Trade {
   id        String @id @default(uuid())
   reference String @unique
-  
-  tenantId  String @map("tenant_id")
-  tenant    Tenant @relation(fields: [tenantId], references: [id])
+
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
   receiptId String  @map("receipt_id")
   receipt   Receipt @relation(fields: [receiptId], references: [id])
@@ -497,9 +706,9 @@ model Trade {
   buyerId String? @map("buyer_id")
   buyer   User?   @relation("TradeBuyer", fields: [buyerId], references: [id])
 
-  quantity Float
-  pricePerUnit Float @map("price_per_unit")
-  totalPrice   Float @map("total_price")
+  quantity     Float
+  pricePerUnit Float       @map("price_per_unit")
+  totalPrice   Float       @map("total_price")
   status       TradeStatus @default(LISTED)
   currency     String      @default("NGN")
 
@@ -515,36 +724,88 @@ model Trade {
   @@index([tenantId])
   @@map("trades")
 }
+
 model RefreshToken {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  user      User     @relation(fields: [userId], references: [id])
-  tokenHash String   @map("token_hash")
-  expiresAt DateTime @map("expires_at")
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
   revokedAt DateTime? @map("revoked_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime  @default(now()) @map("created_at")
 
   @@index([userId])
   @@map("refresh_tokens")
 }
 
+// One row per outstanding password-reset request. `tokenHash` is the
+// SHA-256 of the random token we emailed to the user; the raw token is
+// never stored. Tokens are one-time use (`usedAt` flips on consumption)
+// and short-lived (30 min) so the threat window stays small.
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
 model ActivityLog {
-  id          String   @id @default(uuid())
-  tenantId    String   @map("tenant_id")
-  tenant      Tenant   @relation(fields: [tenantId], references: [id])
-  userId      String?  @map("user_id")
-  user        User?    @relation(fields: [userId], references: [id])
-  
-  action      String   // e.g., "RECEIPT_APPROVED", "CLIENT_CREATED"
-  entityType  String   // e.g., "RECEIPT", "USER"
-  entityId    String?  // The ID of the target entity
+  id       String  @id @default(uuid())
+  tenantId String  @map("tenant_id")
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  userId   String? @map("user_id")
+  user     User?   @relation(fields: [userId], references: [id])
+
+  action      String // e.g., "RECEIPT_APPROVED", "CLIENT_CREATED"
+  entityType  String // e.g., "RECEIPT", "USER"
+  entityId    String? // The ID of the target entity
   description String?
-  metadata    Json?    // Store payload or state diff
-  
-  createdAt   DateTime @default(now()) @map("created_at")
+  metadata    Json? // Store payload or state diff
+
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@index([tenantId])
   @@index([userId])
   @@index([entityId])
   @@map("activity_logs")
 }
+
+// Per-user notification surface. Recipient is `userId`; broadcasting to a
+// role/group is implemented service-side by fanning out one row per recipient
+// so reads remain a single indexed lookup.
+//   - `relatedEntityType` + `relatedEntityId` let the bell deep-link into
+//     the receipt / withdrawal / loan / trade / client view.
+//   - `data` is a small JSON blob for any extras the UI needs without a
+//     schema migration (amount, counterparty name, etc.).
+model Notification {
+  id     String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  userId   String @map("user_id")
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  title   String
+  body    String?
+
+  relatedEntityType String? @map("related_entity_type")
+  relatedEntityId   String? @map("related_entity_id")
+  data              Json?
+
+  isRead  Boolean   @default(false) @map("is_read")
+  readAt  DateTime? @map("read_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, isRead, createdAt(sort: Desc)])
+  @@index([tenantId])
+  @@index([userId, type, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+

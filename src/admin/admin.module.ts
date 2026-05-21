@@ -1,4 +1,7 @@
 import { Module } from '@nestjs/common';
+import { InventoryModule } from '../inventory/inventory.module';
+import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
+import { WarehouseManagerModule } from '../warehouse-manager/warehouse-manager.module';
 import { AdminConfigController } from './controllers/admin-config.controller';
 import { AdminWarehouseController } from './controllers/admin-warehouse.controller';
 import { AdminClientController } from './controllers/admin-client.controller';
@@ -17,6 +20,7 @@ import { AdminActivityService } from './services/admin-activity.service';
 import { AdminTransactionsService } from './services/admin-transactions.service';
 
 @Module({
+  imports: [InventoryModule, WithdrawalsModule, WarehouseManagerModule],
   controllers: [
     AdminConfigController,
     AdminWarehouseController,

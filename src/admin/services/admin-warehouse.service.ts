@@ -4,7 +4,19 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { ReceiptStatus, WarehouseStatus } from '@prisma/client';
+import { ReceiptStatus, WarehouseStatus, WithdrawalStatus } from '@prisma/client';
+import {
+  statusesForGroup,
+  deriveGroup,
+  HELD_STATUSES,
+} from '../../inventory/inventory.types';
+
+// In-warehouse = client-owned, physically present. ACTIVE + held-* leaves.
+// (Excludes SPLIT internal nodes, PENDING_APPROVAL graded-but-not-approved, and all terminal/closed.)
+const IN_WAREHOUSE_STATUSES: ReceiptStatus[] = [
+  ReceiptStatus.ACTIVE,
+  ...HELD_STATUSES,
+];
 
 @Injectable()
 export class AdminWarehouseService {
@@ -50,11 +62,31 @@ export class AdminWarehouseService {
               },
             },
           },
-          _count: { select: { receipts: true } },
         },
       }),
       this.prisma.warehouse.count({ where }),
     ]);
+
+    // Per-row receipt count: root deposits only (parentReceiptId: null) — excludes
+    // SPLIT internal nodes so the number matches "deposits made into this warehouse".
+    const receiptCounts = warehouses.length
+      ? await this.prisma.receipt.groupBy({
+          by: ['warehouseId'],
+          where: {
+            tenantId,
+            parentReceiptId: null,
+            warehouseId: { in: warehouses.map((w) => w.id) },
+          },
+          _count: { _all: true },
+        })
+      : [];
+    const countByWh = new Map(
+      receiptCounts.map((r) => [r.warehouseId, r._count._all]),
+    );
+    const warehousesWithCount = warehouses.map((w) => ({
+      ...w,
+      _count: { receipts: countByWh.get(w.id) ?? 0 },
+    }));
 
     // Aggregate stats
     const allWarehouses = await this.prisma.warehouse.findMany({
@@ -66,12 +98,13 @@ export class AdminWarehouseService {
       0,
     );
 
-    // Total utilized: sum of quantityAvailable on active receipts
+    // Total utilized: client-owned, physically-present quantity (ACTIVE + HELD_*).
+    // Held receipts are still in the warehouse — just under a withdrawal/loan/trade lock.
     const utilizationAgg = await this.prisma.receipt.aggregate({
-      where: { tenantId, status: ReceiptStatus.ACTIVE },
-      _sum: { quantityAvailable: true },
+      where: { tenantId, status: { in: IN_WAREHOUSE_STATUSES } },
+      _sum: { quantity: true },
     });
-    const totalUtilizationMt = utilizationAgg._sum.quantityAvailable ?? 0;
+    const totalUtilizationMt = Number(utilizationAgg._sum.quantity ?? 0);
 
     return {
       stats: {
@@ -79,7 +112,7 @@ export class AdminWarehouseService {
         totalCapacityMt,
         totalUtilizationMt,
       },
-      data: warehouses,
+      data: warehousesWithCount,
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
   }
@@ -115,23 +148,52 @@ export class AdminWarehouseService {
     });
     if (!warehouse) throw new NotFoundException('Warehouse not found');
 
-    // Summary stats
-    const [totalClients, totalReceipts, commodityAgg] = await Promise.all([
-      this.prisma.receipt
-        .groupBy({
-          by: ['clientId'],
-          where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
-        })
-        .then((r) => r.length),
-      this.prisma.receipt.count({ where: { warehouseId: id, tenantId } }),
-      this.prisma.receipt.aggregate({
-        where: { warehouseId: id, tenantId, status: ReceiptStatus.ACTIVE },
-        _sum: { quantityAvailable: true },
-      }),
-    ]);
+    // Summary stats — totals reflect what's *in the warehouse right now*
+    // (client-owned, physically present): ACTIVE + HELD_*. SPLIT internal
+    // nodes and terminal states are excluded everywhere.
+    const [totalClients, totalReceipts, commodityAgg, billedFeeAgg] =
+      await Promise.all([
+        this.prisma.receipt
+          .groupBy({
+            by: ['clientId'],
+            where: {
+              warehouseId: id,
+              tenantId,
+              status: { in: IN_WAREHOUSE_STATUSES },
+            },
+          })
+          .then((r) => r.length),
+        // Root deposits made into this warehouse — matches the WM dashboard.
+        this.prisma.receipt.count({
+          where: { warehouseId: id, tenantId, parentReceiptId: null },
+        }),
+        this.prisma.receipt.aggregate({
+          where: {
+            warehouseId: id,
+            tenantId,
+            status: { in: IN_WAREHOUSE_STATUSES },
+          },
+          _sum: { quantity: true },
+        }),
+        // Total storage fee billed: sum of completed withdrawals' storageFee
+        // for receipts in this warehouse. Drives the "Total Storage Fee" widget.
+        this.prisma.withdrawal.aggregate({
+          where: {
+            tenantId,
+            status: WithdrawalStatus.COMPLETED,
+            receipt: { warehouseId: id },
+          },
+          _sum: { storageFee: true, totalFee: true },
+        }),
+      ]);
 
     const recentReceipts = await this.prisma.receipt.findMany({
-      where: { warehouseId: id, tenantId },
+      where: {
+        warehouseId: id,
+        tenantId,
+        // Hide superseded internal nodes — they're not "receipts" the user issued.
+        status: { notIn: [ReceiptStatus.SPLIT] },
+      },
       orderBy: { createdAt: 'desc' },
       take: 10,
       include: {
@@ -145,11 +207,16 @@ export class AdminWarehouseService {
       managers: warehouse.managerAssignments.map((a) => a.manager),
       summary: {
         totalClients,
-        totalCommodityMt: commodityAgg._sum.quantityAvailable ?? 0,
+        totalCommodityMt: Number(commodityAgg._sum.quantity ?? 0),
         totalReceipts,
+        totalStorageFee: Number(billedFeeAgg._sum.storageFee ?? 0),
+        totalFeesBilled: Number(billedFeeAgg._sum.totalFee ?? 0),
         currency: 'NGN',
       },
-      recentReceipts,
+      recentReceipts: recentReceipts.map((r) => ({
+        ...r,
+        group: deriveGroup(r),
+      })),
     };
   }
 
@@ -174,8 +241,23 @@ export class AdminWarehouseService {
     const limit = Math.min(parseInt(query.limit || '20', 10), 100);
     const skip = (page - 1) * limit;
 
-    const where: any = { warehouseId, tenantId };
-    if (query.status) where.status = query.status;
+    // Default: hide SPLIT internal nodes (superseded parents with children).
+    // Accepts either the new group filter ('ACTIVE'|'LIENED'|'CANCELLED' aka 'PLEDGE')
+    // or a raw ReceiptStatus value — matches WM's listCommodityReceipts contract.
+    const where: any = {
+      warehouseId,
+      tenantId,
+      status: { notIn: [ReceiptStatus.SPLIT] },
+    };
+    const s = (query.status ?? '').toUpperCase();
+    if (s === 'ACTIVE')
+      where.status = { in: statusesForGroup('ACTIVE') };
+    else if (s === 'CANCELLED')
+      where.status = { in: statusesForGroup('CANCELLED') };
+    else if (s === 'LIENED' || s === 'PLEDGE')
+      where.status = { in: statusesForGroup('LIENED') };
+    else if (s && (ReceiptStatus as any)[s])
+      where.status = s as ReceiptStatus;
     if (query.approvalStatus) where.approvalStatus = query.approvalStatus;
 
     const [receipts, total] = await Promise.all([
@@ -186,6 +268,7 @@ export class AdminWarehouseService {
         orderBy: { createdAt: 'desc' },
         include: {
           commodity: { select: { name: true, unitOfMeasure: true } },
+          warehouse: { select: { id: true, name: true, code: true } },
           client: { select: { id: true, firstName: true, lastName: true } },
         },
       }),
@@ -193,7 +276,7 @@ export class AdminWarehouseService {
     ]);
 
     return {
-      data: receipts,
+      data: receipts.map((r) => ({ ...r, group: deriveGroup(r) })),
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
   }
