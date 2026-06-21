@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserStatus } from '@prisma/client';
+import { statusesForGroup } from '../inventory/inventory.types';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import {
@@ -185,7 +186,53 @@ export class ManagersService {
       },
     });
     if (!manager) throw new NotFoundException('Manager not found');
-    return manager;
+
+    // ── Aggregate stats for the portfolio cards ───────────────────────────
+    // The TA's "Manager portfolio" page shows three KPI cards: Total Clients,
+    // Active Clients, Assigned Warehouses. Without these the first two cards
+    // render as "—". `assignedWarehouses` the FE could derive from
+    // managerAssignments.length, but emitting it here keeps the contract
+    // explicit and lets the FE bind to a single `stats` block.
+    //
+    // The scope: any client with at least one receipt in any warehouse this
+    // manager currently oversees. "Active" means at least one receipt whose
+    // status is in the ACTIVE group (ACTIVE / HELD_* in-warehouse states).
+    // SPLIT internal nodes are deliberately excluded by the status filter.
+    const warehouseIds = manager.managerAssignments.map((a) => a.warehouseId);
+    let totalClients = 0;
+    let activeClients = 0;
+    if (warehouseIds.length > 0) {
+      const [t, a] = await Promise.all([
+        this.prisma.user.count({
+          where: {
+            tenantId,
+            receipts: { some: { warehouseId: { in: warehouseIds } } },
+          },
+        }),
+        this.prisma.user.count({
+          where: {
+            tenantId,
+            receipts: {
+              some: {
+                warehouseId: { in: warehouseIds },
+                status: { in: statusesForGroup('ACTIVE') },
+              },
+            },
+          },
+        }),
+      ]);
+      totalClients = t;
+      activeClients = a;
+    }
+
+    return {
+      ...manager,
+      stats: {
+        totalClients,
+        activeClients,
+        assignedWarehouses: warehouseIds.length,
+      },
+    };
   }
 
   async getManagerWarehouses(tenantId: string, id: string) {
@@ -251,14 +298,85 @@ export class ManagersService {
           lastName: true,
           email: true,
           status: true,
-          _count: { select: { receipts: true, loans: true } },
+          // Surface the clientProfile's identifiers — the FE's "Client ID"
+          // column expects clientCode (e.g. CLT-2026-0001) and the "Type"
+          // column expects ClientType (TRADER / MILLER / etc.). These don't
+          // live on User; they live on ClientProfile.
+          clientProfile: {
+            select: { clientCode: true, type: true },
+          },
         },
       }),
       this.prisma.user.count({ where }),
     ]);
 
+    // ── Per-client aggregates, SCOPED to this manager's warehouses ────────
+    // The previous code returned `_count.receipts` which counted every
+    // receipt the client had ever owned, tenant-wide — wrong here, since
+    // a manager portfolio only cares about activity in *their* warehouses.
+    // We do one groupBy per page to attach receipts in scope per client.
+    //
+    // - receiptCount: how many receipts in this manager's warehouses
+    // - totalQuantityMt: sum of receipt.quantity (unit-mixed; see the
+    //   commodityMovement comment for why this is acceptable here — the
+    //   column is just an order-of-magnitude indicator, not a measurement).
+    //   `Mt` in the field name matches the FE table header "Weight (MT)";
+    //   for non-metric-ton commodities the raw quantity passes through.
+    // - lastDepositAt: max receipt.createdAt, scoped.
+    //
+    // Outstanding fee is left as `null` for now — accurate computation
+    // requires the storage-fee policy lookup per receipt plus
+    // (today - depositDate) * rate * quantity, which we can layer in later
+    // without breaking this shape (just flip null → number when ready).
+    const clientIds = clients.map((c) => c.id);
+    const aggMap = new Map<
+      string,
+      { receiptCount: number; totalQuantityMt: number; lastDepositAt: Date | null }
+    >();
+    if (clientIds.length > 0) {
+      const aggs = await this.prisma.receipt.groupBy({
+        by: ['clientId'],
+        where: {
+          clientId: { in: clientIds },
+          warehouseId: { in: warehouseIds },
+          tenantId,
+        },
+        _count: { _all: true },
+        _sum: { quantity: true },
+        _max: { createdAt: true },
+      });
+      for (const a of aggs) {
+        aggMap.set(a.clientId, {
+          receiptCount: a._count._all,
+          totalQuantityMt: Number(a._sum.quantity ?? 0),
+          lastDepositAt: a._max.createdAt,
+        });
+      }
+    }
+
+    const data = clients.map((c) => {
+      const agg = aggMap.get(c.id);
+      return {
+        id: c.id,
+        // Discrete name parts (for split rendering) + combined name (for
+        // single-string columns), same shape conventions as the rest of
+        // the codebase.
+        firstName: c.firstName,
+        lastName: c.lastName,
+        name: `${c.firstName} ${c.lastName}`,
+        email: c.email,
+        status: c.status,
+        clientCode: c.clientProfile?.clientCode ?? null,
+        type: c.clientProfile?.type ?? null,
+        receiptCount: agg?.receiptCount ?? 0,
+        totalQuantityMt: agg?.totalQuantityMt ?? 0,
+        lastDepositAt: agg?.lastDepositAt ?? null,
+        outstandingFee: null,
+      };
+    });
+
     return {
-      data: clients,
+      data,
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
   }
