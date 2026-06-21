@@ -1,6 +1,8 @@
 import {
   Injectable,
   BadRequestException,
+  ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -8,7 +10,8 @@ import { LoanStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { CalculateLoanDto, CreateLoanDto } from './dto/loans.dto';
+import { SecurityService } from '../security/security.service';
+import { CalculateLoanDto, CreateLoanDto, EditLoanDto } from './dto/loans.dto';
 
 @Injectable()
 export class LoansService {
@@ -16,6 +19,7 @@ export class LoansService {
     private prisma: PrismaService,
     private ledger: InventoryLedgerService,
     private notifications: NotificationsService,
+    private security: SecurityService,
   ) {}
 
   async getFinanciers(tenantId: string) {
@@ -90,7 +94,17 @@ export class LoansService {
     dto: CreateLoanDto,
     clientId: string,
     actorUserId?: string,
+    opts: { isOnBehalf?: boolean } = {},
   ) {
+    // 2FA gate — see WithdrawalsService.createWithdrawalRequest for semantics.
+    await this.security.assertTransactionAuth({
+      userId: clientId,
+      purpose: 'LOAN',
+      pin: dto.pin,
+      otp: dto.otp,
+      isOnBehalf: opts.isOnBehalf,
+    });
+
     const receipt = await this.prisma.receipt.findFirst({
       where: { id: dto.receiptId, tenantId },
     });
@@ -265,6 +279,241 @@ export class LoansService {
       id: updated.id,
       status: updated.status,
       releasedReceipt: released.receiptNumber,
+    };
+  }
+
+  /**
+   * Edit a previously-filed loan. Permission + state model:
+   *
+   *   Caller is the OWNING client OR a TENANT_ADMIN/GLOBAL_ADMIN OR a WM
+   *   assigned to the pledged receipt's warehouse → permission OK.
+   *
+   *   PENDING       → anyone above can edit (amount, financierId, notes).
+   *                   When amount or financierId change we recompute
+   *                   tenureMonths / totalInterest / monthlyPayment via
+   *                   the same formula createLoan uses.
+   *   APPROVED      → admin only, notes only.
+   *   ACTIVE        → admin only, notes only.
+   *   REPAID /
+   *   DEFAULTED /
+   *   REJECTED /
+   *   CANCELLED     → 409. Terminal, no edits.
+   */
+  async editLoan(args: {
+    tenantId: string;
+    loanId: string;
+    actorUserId: string;
+    actorRoles: string[];
+    dto: EditLoanDto;
+  }) {
+    const loan = await this.prisma.loan.findFirst({
+      where: { id: args.loanId, tenantId: args.tenantId },
+    });
+    if (!loan) throw new NotFoundException('Loan not found');
+
+    const terminal: LoanStatus[] = [
+      LoanStatus.REPAID,
+      LoanStatus.DEFAULTED,
+      LoanStatus.REJECTED,
+      LoanStatus.CANCELLED,
+    ];
+    if (terminal.includes(loan.status)) {
+      throw new ConflictException(
+        `This loan is ${loan.status.toLowerCase()} and cannot be edited.`,
+      );
+    }
+
+    const isAdmin = args.actorRoles.some(
+      (r) => r === 'TENANT_ADMIN' || r === 'GLOBAL_ADMIN',
+    );
+    const isOwner = loan.clientId === args.actorUserId;
+    let isAuthorizedWm = false;
+    if (
+      !isAdmin &&
+      !isOwner &&
+      args.actorRoles.includes('WAREHOUSE_MANAGER')
+    ) {
+      const pledged = await this.prisma.receipt.findUnique({
+        where: { id: loan.receiptId },
+        select: { warehouseId: true },
+      });
+      if (pledged) {
+        const assignment =
+          await this.prisma.warehouseManagerAssignment.findFirst({
+            where: {
+              tenantId: args.tenantId,
+              warehouseId: pledged.warehouseId,
+              managerId: args.actorUserId,
+              unassignedAt: null,
+            },
+          });
+        isAuthorizedWm = !!assignment;
+      }
+    }
+    if (!isAdmin && !isOwner && !isAuthorizedWm) {
+      throw new ForbiddenException(
+        'Only the loan owner, an admin, or an assigned WM can edit this loan.',
+      );
+    }
+
+    // State gate for non-admins: PENDING only (per spec — once admin has
+    // approved, only the admin should be touching it).
+    if (!isAdmin && loan.status !== LoanStatus.PENDING) {
+      throw new ConflictException(
+        `This loan is already ${loan.status} — only a tenant admin can edit it now.`,
+      );
+    }
+
+    // Field gate: amount + financierId are only editable in PENDING (even
+    // for admins). Past PENDING those values feed already-disclosed
+    // payment schedules; if they need to change, recreate the loan.
+    if (loan.status !== LoanStatus.PENDING) {
+      const disallowed: string[] = [];
+      if (args.dto.amount !== undefined) disallowed.push('amount');
+      if (args.dto.financierId !== undefined) disallowed.push('financierId');
+      if (disallowed.length) {
+        throw new BadRequestException(
+          `Cannot edit ${disallowed.join(', ')} on a ${loan.status} loan. Notes can still be updated; for material changes, cancel and refile.`,
+        );
+      }
+    }
+
+    const beforeAfter: Record<string, { from: unknown; to: unknown }> = {};
+    const updateData: any = {};
+
+    let nextFinancier:
+      | { id: string; interestRate: number; maxTenure: number }
+      | null = null;
+    if (
+      args.dto.financierId !== undefined &&
+      args.dto.financierId !== loan.financierId
+    ) {
+      const f = await this.prisma.financier.findFirst({
+        where: { id: args.dto.financierId, tenantId: args.tenantId },
+        select: { id: true, interestRate: true, maxTenure: true },
+      });
+      if (!f) throw new BadRequestException('financierId is invalid for this tenant.');
+      nextFinancier = f;
+      beforeAfter['financierId'] = {
+        from: loan.financierId,
+        to: args.dto.financierId,
+      };
+      updateData.financierId = args.dto.financierId;
+    }
+    if (args.dto.amount !== undefined && args.dto.amount !== loan.amount) {
+      beforeAfter['amount'] = { from: loan.amount, to: args.dto.amount };
+      updateData.amount = args.dto.amount;
+    }
+    if (
+      args.dto.notes !== undefined &&
+      args.dto.notes !== (loan.notes ?? null)
+    ) {
+      beforeAfter['notes'] = { from: loan.notes, to: args.dto.notes };
+      updateData.notes = args.dto.notes;
+    }
+
+    // Recompute interest / monthlyPayment / tenureMonths when either
+    // amount or financier changed.
+    const amountChanged = updateData.amount !== undefined;
+    const financierChanged = updateData.financierId !== undefined;
+    if (amountChanged || financierChanged) {
+      const interestRate =
+        nextFinancier?.interestRate ?? loan.interestRate;
+      const tenureMonths =
+        nextFinancier?.maxTenure ?? loan.tenureMonths;
+      const principal = updateData.amount ?? loan.amount;
+      const totalInterest = (principal * interestRate) / 100;
+      const monthlyPayment = (principal + totalInterest) / tenureMonths;
+      if (interestRate !== loan.interestRate) {
+        beforeAfter['interestRate'] = {
+          from: loan.interestRate,
+          to: interestRate,
+        };
+        updateData.interestRate = interestRate;
+      }
+      if (tenureMonths !== loan.tenureMonths) {
+        beforeAfter['tenureMonths'] = {
+          from: loan.tenureMonths,
+          to: tenureMonths,
+        };
+        updateData.tenureMonths = tenureMonths;
+      }
+      if (totalInterest !== loan.totalInterest) {
+        beforeAfter['totalInterest'] = {
+          from: loan.totalInterest,
+          to: totalInterest,
+        };
+        updateData.totalInterest = totalInterest;
+      }
+      if (monthlyPayment !== loan.monthlyPayment) {
+        beforeAfter['monthlyPayment'] = {
+          from: loan.monthlyPayment,
+          to: monthlyPayment,
+        };
+        updateData.monthlyPayment = monthlyPayment;
+      }
+    }
+
+    if (!Object.keys(updateData).length) {
+      return {
+        id: loan.id,
+        reference: loan.reference,
+        status: loan.status,
+        message: 'No changes to apply.',
+      };
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.loan.update({
+        where: { id: loan.id },
+        data: updateData,
+      });
+      await tx.activityLog.create({
+        data: {
+          tenantId: args.tenantId,
+          userId: args.actorUserId,
+          action: 'LOAN_EDITED',
+          entityType: 'Loan',
+          entityId: loan.id,
+          metadata: {
+            actorKind: isAdmin ? 'TA' : isOwner ? 'CLIENT' : 'WM',
+            stateAtEdit: loan.status,
+            changes: beforeAfter,
+            editReason: args.dto.editReason ?? null,
+          } as any,
+        },
+      });
+      return u;
+    });
+
+    if (!isOwner) {
+      void this.notifications.notifyUser(loan.clientId, {
+        tenantId: args.tenantId,
+        type: 'LOAN_REQUESTED',
+        title: 'Your loan was updated',
+        body: `${updated.reference}: details were edited by ${isAdmin ? 'a tenant admin' : 'a warehouse manager'}.`,
+        relatedEntityType: 'loan',
+        relatedEntityId: loan.id,
+        data: { changedFields: Object.keys(beforeAfter) },
+      });
+    }
+    if (!isAdmin) {
+      void this.notifications.notifyTenantAdmins(args.tenantId, {
+        type: 'LOAN_REQUESTED',
+        title: 'Loan updated',
+        body: `${updated.reference}: details were edited prior to admin action.`,
+        relatedEntityType: 'loan',
+        relatedEntityId: loan.id,
+        data: { changedFields: Object.keys(beforeAfter) },
+      });
+    }
+
+    return {
+      id: updated.id,
+      reference: updated.reference,
+      status: updated.status,
+      changedFields: Object.keys(beforeAfter),
+      message: 'Loan updated.',
     };
   }
 

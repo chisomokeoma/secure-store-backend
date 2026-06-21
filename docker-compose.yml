@@ -1,0 +1,40 @@
+# Local infra for the backend. Currently just Redis (the BullMQ queue backing
+# the email pipeline). Postgres lives on Neon for both dev and prod, so it's
+# intentionally NOT in here.
+#
+# Usage:
+#   docker compose up -d     # starts Redis in the background
+#   docker compose down      # stops + removes containers
+#   docker compose logs -f   # tails logs from any running services
+#
+# Connection string the app reads:
+#   REDIS_URL=redis://localhost:6379
+#
+# Data is persisted to the named volume `redis-data` so restarts don't lose
+# in-flight queue state. To wipe the queue clean: docker compose down -v
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: securestore-redis
+    # Host port 6390 → container's 6379. We bind to 6390 on the host because
+    # the standard Redis port (6379) is taken by another local app. Inside
+    # the container Redis still listens on 6379; only what the host sees
+    # changes. Update REDIS_URL in .env to match.
+    ports:
+      - "6390:6379"
+    restart: unless-stopped
+    # AOF (append-only file) gives us crash-safety for queued jobs. Without
+    # it, a power cycle could lose jobs that were already accepted but not
+    # yet processed.
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:

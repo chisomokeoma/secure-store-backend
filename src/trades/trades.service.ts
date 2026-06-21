@@ -9,6 +9,7 @@ import { TradeStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SecurityService } from '../security/security.service';
 
 @Injectable()
 export class TradesService {
@@ -16,6 +17,7 @@ export class TradesService {
     private prisma: PrismaService,
     private ledger: InventoryLedgerService,
     private notifications: NotificationsService,
+    private security: SecurityService,
   ) {}
 
   async getTrades(
@@ -111,10 +113,20 @@ export class TradesService {
    */
   async createTrade(
     tenantId: string,
-    dto: { receiptId: string },
+    dto: { receiptId: string; pin?: string; otp?: string; pricePerUnit?: number },
     sellerId: string,
     actorUserId?: string,
+    opts: { isOnBehalf?: boolean } = {},
   ) {
+    // 2FA gate — see WithdrawalsService.createWithdrawalRequest for semantics.
+    await this.security.assertTransactionAuth({
+      userId: sellerId,
+      purpose: 'TRADE',
+      pin: dto.pin,
+      otp: dto.otp,
+      isOnBehalf: opts.isOnBehalf,
+    });
+
     const receipt = await this.prisma.receipt.findFirst({
       where: { id: dto.receiptId, tenantId },
     });

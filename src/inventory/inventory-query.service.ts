@@ -173,6 +173,17 @@ export class InventoryQueryService {
         commodity: { select: { name: true, unitOfMeasure: true } },
         warehouse: { select: { name: true, location: true } },
         client: { select: { id: true, firstName: true, lastName: true } },
+        // Approver — surfaced on the printable/emailable receipt so the
+        // document records who admitted the inventory.
+        approvedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            managerCode: true,
+            profilePhotoUrl: true,
+          },
+        },
         childReceipts: {
           select: { id: true, receiptNumber: true, status: true, quantity: true },
         },
@@ -184,6 +195,7 @@ export class InventoryQueryService {
                 firstName: true,
                 lastName: true,
                 managerCode: true,
+                profilePhotoUrl: true,
               },
             },
           },
@@ -212,6 +224,27 @@ export class InventoryQueryService {
       quantity: r.quantity.toString(),
       commodity: r.commodity.name,
       unit: r.commodity.unitOfMeasure,
+      // ── Printable / emailable receipt fields ─────────────────────────────
+      // Everything below this comment exists specifically because the FE
+      // renders a "print this receipt" / "email this receipt" view and the
+      // physical document needs to record the canonical facts of the
+      // deposit: when the goods arrived, when the receipt expires (if at
+      // all), what grade the commodity was admitted at, when an admin
+      // signed off, and who that admin was. Nullable across the board
+      // because legacy / seed rows may not have all of these.
+      dateOfDeposit: r.dateOfDeposit,
+      expiryDate: r.expiryDate,
+      grade: r.grade,
+      computedGrade: r.computedGrade,
+      approvedAt: r.approvedAt,
+      approvedBy: r.approvedBy
+        ? {
+            id: r.approvedBy.id,
+            name: `${r.approvedBy.firstName} ${r.approvedBy.lastName}`,
+            managerCode: r.approvedBy.managerCode,
+            profilePhotoUrl: r.approvedBy.profilePhotoUrl ?? null,
+          }
+        : null,
       warehouse: { name: r.warehouse.name, location: r.warehouse.location },
       owner: r.client,
       provenance: {
@@ -237,6 +270,7 @@ export class InventoryQueryService {
             id: r.sourceEvent.actor.id,
             name: `${r.sourceEvent.actor.firstName} ${r.sourceEvent.actor.lastName}`,
             managerCode: r.sourceEvent.actor.managerCode,
+            profilePhotoUrl: r.sourceEvent.actor.profilePhotoUrl ?? null,
           }
         : null,
       // Active storage-fee policy that will apply to this receipt.

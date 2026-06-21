@@ -115,6 +115,7 @@ export class ManagersService {
           middleName: true,
           phoneNumber: true,
           managerCode: true,
+          profilePhotoUrl: true,
           status: true,
           createdAt: true,
           managerAssignments: {
@@ -419,6 +420,7 @@ export class ManagersService {
         firstName: true,
         lastName: true,
         managerCode: true,
+        profilePhotoUrl: true,
         status: true,
         updatedAt: true,
       },

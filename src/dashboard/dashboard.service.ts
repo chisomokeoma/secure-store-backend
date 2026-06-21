@@ -97,12 +97,33 @@ export class DashboardService {
     };
   }
 
-  async getCommodityBreakdown(tenantId: string) {
+  /**
+   * Commodity breakdown for the dashboard chart.
+   *
+   * Scoping: when `forClientId` is set (caller is acting as CLIENT), the
+   * breakdown reflects ONLY that client's holdings. Otherwise (admin / WM /
+   * unscoped), the breakdown is tenant-wide. This is the load-bearing fix
+   * for the leak where a new client like Prosper Jaja was seeing other
+   * clients' Maize/Rice totals on his empty dashboard.
+   *
+   * In-warehouse set: ACTIVE + every HELD_* status (including
+   * HELD_WITHDRAWAL, which the old impl was missing — a withdrawal in
+   * flight is still inventory the warehouse is holding, just earmarked).
+   */
+  async getCommodityBreakdown(tenantId: string, forClientId?: string) {
     const breakdown = await this.prisma.receipt.groupBy({
       by: ['commodityId'],
       where: {
         tenantId,
-        status: { in: ['ACTIVE', 'HELD_LOAN', 'HELD_TRADE'] },
+        ...(forClientId ? { clientId: forClientId } : {}),
+        status: {
+          in: [
+            'ACTIVE',
+            'HELD_WITHDRAWAL',
+            'HELD_LOAN',
+            'HELD_TRADE',
+          ],
+        },
       },
       _sum: { quantity: true },
     });
@@ -117,7 +138,21 @@ export class DashboardService {
     }));
   }
 
-  async getActivityTrend(tenantId: string, range: '7d' | '1m' | '6m' | '1y') {
+  /**
+   * Activity trend chart. Same scoping rule as commodity-breakdown:
+   *   CLIENT  → only their own deposits + withdrawals
+   *   admin / WM / unscoped → tenant-wide
+   *
+   * Deposit data filters to root receipts (parentReceiptId: null) so SPLIT
+   * internal nodes don't double-count — a withdrawal that splits the parent
+   * mints a child receipt, and counting that child as a "deposit" would
+   * inflate the trend.
+   */
+  async getActivityTrend(
+    tenantId: string,
+    range: '7d' | '1m' | '6m' | '1y',
+    forClientId?: string,
+  ) {
     const now = new Date();
     const startDate = new Date();
     switch (range) {
@@ -137,11 +172,20 @@ export class DashboardService {
 
     const [receipts, withdrawals] = await Promise.all([
       this.prisma.receipt.findMany({
-        where: { tenantId, createdAt: { gte: startDate } },
+        where: {
+          tenantId,
+          ...(forClientId ? { clientId: forClientId } : {}),
+          parentReceiptId: null,
+          createdAt: { gte: startDate },
+        },
         select: { createdAt: true, quantity: true },
       }),
       this.prisma.withdrawal.findMany({
-        where: { tenantId, createdAt: { gte: startDate } },
+        where: {
+          tenantId,
+          ...(forClientId ? { clientId: forClientId } : {}),
+          createdAt: { gte: startDate },
+        },
         select: { createdAt: true, quantity: true },
       }),
     ]);
@@ -175,27 +219,54 @@ export class DashboardService {
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  async getRecentActivities(tenantId: string): Promise<RecentActivityDto[]> {
+  /**
+   * Recent activities feed. Same scoping: CLIENT sees only their own;
+   * everyone else sees tenant-wide. Trades match on either sellerId OR
+   * buyerId so a client sees trades they're a party to in either role.
+   * Receipts filter to root deposits so SPLIT internal nodes don't show
+   * up as fresh activity to the user.
+   */
+  async getRecentActivities(
+    tenantId: string,
+    forClientId?: string,
+  ): Promise<RecentActivityDto[]> {
     const [receipts, withdrawals, loans, trades] = await Promise.all([
       this.prisma.receipt.findMany({
-        where: { tenantId },
+        where: {
+          tenantId,
+          ...(forClientId ? { clientId: forClientId } : {}),
+          parentReceiptId: null,
+        },
         take: 5,
         orderBy: { createdAt: 'desc' },
         include: { commodity: true },
       }),
       this.prisma.withdrawal.findMany({
-        where: { tenantId },
+        where: {
+          tenantId,
+          ...(forClientId ? { clientId: forClientId } : {}),
+        },
         take: 5,
         orderBy: { createdAt: 'desc' },
         include: { receipt: { include: { commodity: true } } },
       }),
       this.prisma.loan.findMany({
-        where: { tenantId },
+        where: {
+          tenantId,
+          ...(forClientId ? { clientId: forClientId } : {}),
+        },
         take: 5,
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.trade.findMany({
-        where: { tenantId },
+        where: {
+          tenantId,
+          // Trades have two parties — sellerId and buyerId. A client sees
+          // trades they're either side of.
+          ...(forClientId
+            ? { OR: [{ sellerId: forClientId }, { buyerId: forClientId }] }
+            : {}),
+        },
         take: 5,
         orderBy: { createdAt: 'desc' },
         include: { receipt: { include: { commodity: true } } },

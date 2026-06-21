@@ -16,6 +16,10 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = 'Internal server error';
     let technicalMessage = exception?.message || 'Unknown error';
+    // Any extra structured fields the throwing code supplied on the response
+    // object — `code`, `attemptsRemaining`, etc. Forwarded as top-level keys
+    // so the FE can branch on them without parsing the message text.
+    let extras: Record<string, unknown> = {};
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -31,6 +35,22 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         } else {
           message = resObj.message || message;
         }
+
+        // Pass through everything except the keys Nest / this filter own.
+        // This lets a service throw new BadRequestException({
+        //   code: 'OTP_INVALID', attemptsRemaining: 3, message: '...' })
+        // and have `code` + `attemptsRemaining` reach the client verbatim.
+        const reserved = new Set([
+          'message',
+          'statusCode',
+          'error',
+          'status',
+          'state',
+          'technicalMessage',
+        ]);
+        for (const k of Object.keys(resObj)) {
+          if (!reserved.has(k)) extras[k] = resObj[k];
+        }
       } else if (typeof exceptionResponse === 'string') {
         message = exceptionResponse;
       }
@@ -42,10 +62,13 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       }
     }
 
-    // Return exact signature requested
+    // Return exact signature requested, with any structured extras the
+    // throwing code attached. `state: 'error'` and `status` always last so
+    // they can't be clobbered by extras.
     response.status(status).json({
       technicalMessage,
       message,
+      ...extras,
       status,
       state: 'error',
     });

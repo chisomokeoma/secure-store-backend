@@ -3,6 +3,8 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
+import { randomInt } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReceiptStatus, WarehouseStatus, WithdrawalStatus } from '@prisma/client';
 import {
@@ -58,6 +60,7 @@ export class AdminWarehouseService {
                   firstName: true,
                   lastName: true,
                   managerCode: true,
+                  profilePhotoUrl: true,
                 },
               },
             },
@@ -133,6 +136,7 @@ export class AdminWarehouseService {
                 lastName: true,
                 email: true,
                 managerCode: true,
+                profilePhotoUrl: true,
               },
             },
           },
@@ -281,6 +285,59 @@ export class AdminWarehouseService {
     };
   }
 
+  // ─── COMMODITIES FOR A WAREHOUSE ────────────────────────────────────────────
+
+  /**
+   * The commodities explicitly LINKED to this warehouse — i.e. the ones the
+   * warehouse is configured to accept deposits for. Sibling of
+   * `getWarehouseReceipts` and `getWarehouseManagers`; same pattern.
+   *
+   * NOT the same as the tenant-wide list at `GET /admin/grading/commodities`
+   * — that one returns every commodity the tenant has defined, regardless
+   * of warehouse. Use that endpoint to populate a "pick a commodity to
+   * link" dropdown; use THIS endpoint to render the "Commodities linked
+   * to this warehouse" card.
+   *
+   * Shape: a flat list of commodities (not the join rows). `linkedAt`
+   * surfaces when each commodity was linked, which the UI can use to show
+   * "added X days ago" if that ever becomes useful.
+   */
+  async getWarehouseCommodities(tenantId: string, warehouseId: string) {
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, tenantId },
+      select: { id: true },
+    });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+
+    const links = await this.prisma.warehouseCommodity.findMany({
+      where: { warehouseId, tenantId },
+      include: {
+        commodity: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+            description: true,
+            unitOfMeasure: true,
+            standardBagWeightKg: true,
+            gradingLogic: true,
+            numberOfGrades: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return links.map((l) => ({
+      ...l.commodity,
+      linkedAt: l.createdAt,
+      // Legacy per-link storage-fee column on WarehouseCommodity. Kept on
+      // the response so callers that still read it don't break; the
+      // authoritative fee policy is on StorageFeePolicy now.
+      legacyStorageFeePerUnit: l.storageFeePerUnit,
+    }));
+  }
+
   // ─── MANAGERS FOR A WAREHOUSE ───────────────────────────────────────────────
 
   async getWarehouseManagers(tenantId: string, warehouseId: string) {
@@ -299,6 +356,7 @@ export class AdminWarehouseService {
             lastName: true,
             email: true,
             managerCode: true,
+            profilePhotoUrl: true,
             status: true,
           },
         },
@@ -468,11 +526,136 @@ export class AdminWarehouseService {
           assignedBy,
         })),
       });
+      // Force a password rotation on the next warehouse sign-in. Per spec:
+      // every new inheritance triggers a rotation, so the prior team's
+      // shared credential is invalidated.
+      await this.prisma.warehouse.update({
+        where: { id: warehouseId },
+        data: { mustChangePassword: true },
+      });
     }
 
     return {
       assigned: newIds.length,
       alreadyAssigned: managerIds.length - newIds.length,
     };
+  }
+
+  // ─── WAREHOUSE CREDENTIAL (admin-controlled) ───────────────────────────────
+
+  /**
+   * Set the shared warehouse email + initial password. Admin-only. Returns
+   * the temp password ONCE so the admin can hand it off to the manager
+   * (same one-shot pattern as client creation). After this call the
+   * warehouse is loggable via POST /auth/warehouse-login.
+   *
+   * Idempotent on email: passing the same email a second time just resets
+   * the password (effectively a forced rotation). Use this for both initial
+   * setup and out-of-band recovery.
+   */
+  async setWarehouseCredentials(
+    tenantId: string,
+    warehouseId: string,
+    args: { email: string; password?: string },
+  ) {
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, tenantId },
+    });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+
+    const email = args.email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new BadRequestException('A valid email address is required.');
+    }
+    // Email must be unique across warehouses (and shouldn't collide with a
+    // user login — they're different identity spaces, but reusing the same
+    // address is confusing).
+    const taken = await this.prisma.warehouse.findFirst({
+      where: { email, NOT: { id: warehouseId } },
+      select: { id: true },
+    });
+    if (taken) {
+      throw new BadRequestException(
+        'That email is already in use by another warehouse.',
+      );
+    }
+
+    const password = args.password ?? this.generateInitialPassword();
+    const hash = await bcrypt.hash(password, 10);
+
+    await this.prisma.warehouse.update({
+      where: { id: warehouseId },
+      data: {
+        email,
+        passwordHash: hash,
+        passwordSetAt: new Date(),
+        // Whether this is initial setup or a rotation, the next manager
+        // sign-in must change the password.
+        mustChangePassword: true,
+      },
+    });
+
+    return {
+      success: true,
+      message:
+        'Warehouse credentials set. The next sign-in will require a password change.',
+      // Returned ONCE — the admin must record/relay it before leaving the page.
+      credentials: { email, initialPassword: password },
+    };
+  }
+
+  /**
+   * Force a password rotation without resetting the email — generates a
+   * new initial password (one-shot return) and flips mustChangePassword.
+   * Useful for "I think the previous manager still knows the password".
+   */
+  async resetWarehousePassword(tenantId: string, warehouseId: string) {
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, tenantId },
+      select: { id: true, email: true },
+    });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+    if (!warehouse.email) {
+      throw new BadRequestException(
+        'Set a warehouse email first via PATCH /admin/warehouses/:id/credentials.',
+      );
+    }
+    const password = this.generateInitialPassword();
+    const hash = await bcrypt.hash(password, 10);
+    await this.prisma.warehouse.update({
+      where: { id: warehouseId },
+      data: {
+        passwordHash: hash,
+        passwordSetAt: new Date(),
+        mustChangePassword: true,
+      },
+    });
+    return {
+      success: true,
+      message:
+        'Warehouse password reset. The next sign-in will require a password change.',
+      credentials: { email: warehouse.email, initialPassword: password },
+    };
+  }
+
+  private generateInitialPassword(): string {
+    // 10-char temp password: at least one upper, one lower, one digit, one
+    // symbol — enough to satisfy the warehouse-auth strength check on first
+    // login.
+    const sets = [
+      'ABCDEFGHJKLMNPQRSTUVWXYZ',
+      'abcdefghjkmnpqrstuvwxyz',
+      '23456789',
+      '!@#$%&',
+    ];
+    const all = sets.join('');
+    const pick = (s: string) => s[randomInt(s.length)];
+    return (
+      pick(sets[0]) +
+      pick(sets[1]) +
+      pick(sets[2]) +
+      pick(sets[3]) +
+      Array.from({ length: 6 }, () => pick(all)).join('')
+    );
   }
 }

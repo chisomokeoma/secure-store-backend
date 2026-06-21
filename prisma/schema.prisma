@@ -102,6 +102,18 @@ enum FeeType {
   FLAT_RATE
 }
 
+enum TransactionOtpPurpose {
+  WITHDRAWAL
+  LOAN
+  TRADE
+  DISABLE_2FA
+  // CHANGE_PASSWORD is the step-up gate for an in-app password rotation.
+  // Required whether or not the user has 2FA enabled — the OTP is the
+  // proof-of-mailbox-control that stops anyone with session access (e.g.
+  // a WM on a shared kiosk) from quietly changing the client's password.
+  CHANGE_PASSWORD
+}
+
 enum NotificationType {
   // Client lifecycle
   CLIENT_REGISTERED
@@ -160,6 +172,70 @@ enum ClientType {
   OTHER
 }
 
+// Distinguishes the legal nature of the client. INDIVIDUAL clients use the
+// classic personal fields on User + ClientProfile; ORGANIZATION clients
+// fill in the corporate block (RC number, directors, docs) and the User
+// row represents their Authorized Representative.
+enum ClientMode {
+  INDIVIDUAL
+  ORGANIZATION
+}
+
+// Company legal structure — straight from the corporate-onboarding form.
+// `OTHER` captures the "Provide Detail" free-text via
+// `companyCategoryOther` on the profile.
+enum CompanyCategory {
+  PARTNERSHIP
+  PLC
+  LLC
+  COOPERATIVE
+  OTHER
+}
+
+enum IdType {
+  NIN
+  INTERNATIONAL_PASSPORT
+  DRIVERS_LICENSE
+  VOTERS_CARD
+}
+
+enum MaritalStatus {
+  SINGLE
+  MARRIED
+  DIVORCED
+  WIDOWED
+}
+
+// Document types we accept for a client. Names map 1:1 to the corporate-
+// onboarding form's "Required Documentation" list, plus the per-person
+// docs (passport photo / ID / utility bill) the rep and directors submit.
+enum ClientDocumentType {
+  // Company-level (ORGANIZATION mode only)
+  CERTIFICATE_OF_INCORPORATION
+  MEMORANDUM_AND_ARTICLES
+  CAC_FORM_2_OR_7
+  CAC_STATUS_REPORT
+  TIN_CERTIFICATE
+  BOARD_RESOLUTION
+  COMPANY_UTILITY_BILL
+  // Per-person (Authorized Representative or any Director)
+  PASSPORT_PHOTO
+  MEANS_OF_ID
+  UTILITY_BILL
+  // Anything else
+  OTHER
+}
+
+// Whose document is this? COMPANY = belongs to the org itself.
+// REPRESENTATIVE = belongs to the org's authorized rep (the User on the
+// ClientProfile). DIRECTOR = belongs to a specific ClientDirector — in
+// that case `scopeRefId` carries the director's id.
+enum ClientDocumentScope {
+  COMPANY
+  REPRESENTATIVE
+  DIRECTOR
+}
+
 // ==========================================
 // MODELS
 // ==========================================
@@ -187,6 +263,8 @@ model Tenant {
   inventoryEvents      InventoryEvent[]
   clientProfiles       ClientProfile[]
   clientFocusCommodities ClientFocusCommodity[]
+  clientDirectors      ClientDirector[]
+  clientDocuments      ClientDocument[]
   notifications        Notification[]
 
   @@map("tenants")
@@ -218,6 +296,17 @@ model User {
   permissions        Json?
   notificationPrefs  Json?      @map("notification_prefs")
 
+  // Transaction-time security (gated by the user's 2FA toggle):
+  //  - `transactionPinHash` is a bcrypt hash of the 4-digit PIN the user
+  //    sets in Settings. Required to be present before 2FA can be turned on.
+  //  - `twoFactorEnabled` is the master switch. When TRUE, every
+  //    withdrawal / loan / trade the user initiates also requires a
+  //    fresh OTP delivered to their registered channel.
+  transactionPinHash       String?   @map("transaction_pin_hash")
+  transactionPinUpdatedAt  DateTime? @map("transaction_pin_updated_at")
+  twoFactorEnabled         Boolean   @default(false) @map("two_factor_enabled")
+  twoFactorEnabledAt       DateTime? @map("two_factor_enabled_at")
+
   receipts            Receipt[]
   withdrawals         Withdrawal[]
   loans               Loan[]
@@ -233,6 +322,7 @@ model User {
   clientProfile       ClientProfile?               @relation("ClientUser")
   registeredClients   ClientProfile[]              @relation("ClientRegistrar")
   notifications       Notification[]
+  transactionOtps     TransactionOtp[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -281,6 +371,16 @@ model Warehouse {
   address    String?
   capacityMt Float?          @map("capacity_mt")
   status     WarehouseStatus @default(ACTIVE)
+
+  // Shared warehouse credential — managers sign in as the warehouse, then
+  // identify themselves (which person from the assigned roster did this).
+  // `mustChangePassword` flips TRUE whenever a new manager is assigned, so
+  // every "inheritance" forces a fresh password on next sign-in (rotating
+  // the credential the prior team knew).
+  email              String?   @unique
+  passwordHash       String?   @map("password_hash")
+  passwordSetAt      DateTime? @map("password_set_at")
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
 
   receipts             Receipt[]
   warehouseCommodities WarehouseCommodity[]
@@ -515,6 +615,11 @@ model ClientProfile {
 
   clientCode String     @unique @map("client_code")
   type       ClientType @default(FARMER)
+
+  // INDIVIDUAL is the legacy / default path. ORGANIZATION enables the
+  // corporate-onboarding fields below + directors[] + documents[].
+  mode       ClientMode @default(INDIVIDUAL)
+
   occupation String?
   description String?
 
@@ -522,6 +627,29 @@ model ClientProfile {
   stateOfOrigin String? @map("state_of_origin")
   lga           String?
   nationalId    String? @map("national_id")
+
+  // ── Organization-only fields (NULL when mode = INDIVIDUAL) ──────────────
+  rcNumber             String?          @map("rc_number")
+  companyName          String?          @map("company_name")
+  companyCategory      CompanyCategory? @map("company_category")
+  companyCategoryOther String?          @map("company_category_other")
+  dateOfIncorporation  DateTime?        @map("date_of_incorporation")
+  natureOfBusiness     String?          @map("nature_of_business")
+  sectorIndustry       String?          @map("sector_industry")
+  businessAddress      String?          @map("business_address")
+  tin                  String?
+
+  // ── Authorized Representative (org mode) / additional KYC (individual) ──
+  // For ORGANIZATION clients these describe the rep; for INDIVIDUAL clients
+  // they're optional self-KYC fields the form may collect.
+  representativeDesignation String?        @map("representative_designation")
+  otherNames                String?        @map("other_names")
+  mothersMaidenName         String?        @map("mothers_maiden_name")
+  maritalStatus             MaritalStatus? @map("marital_status")
+  idType                    IdType?        @map("id_type")
+  idNumber                  String?        @map("id_number")
+  idIssueDate               DateTime?      @map("id_issue_date")
+  idExpiryDate              DateTime?      @map("id_expiry_date")
 
   // Multi-focus: a client can target several commodities. Use the
   // `focusCommodities` join below; the legacy single-FK column is dropped
@@ -544,12 +672,85 @@ model ClientProfile {
   registeredByManagerId String? @map("registered_by_manager_id")
   registeredByManager   User?   @relation("ClientRegistrar", fields: [registeredByManagerId], references: [id])
 
+  // ORGANIZATION-mode children. Cascade on delete so removing a client
+  // takes its directors + documents with it.
+  directors ClientDirector[]
+  documents ClientDocument[]
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([tenantId])
   @@index([registeredByManagerId])
   @@map("client_profiles")
+}
+
+// One row per director on an ORGANIZATION-mode client. Mirrors the
+// "Director Details + ADD" repeatable section of the corporate-onboarding
+// form. INDIVIDUAL clients have no directors; the relation is left empty.
+model ClientDirector {
+  id                String        @id @default(uuid())
+  tenantId          String        @map("tenant_id")
+  tenant            Tenant        @relation(fields: [tenantId], references: [id])
+  clientProfileId   String        @map("client_profile_id")
+  clientProfile     ClientProfile @relation(fields: [clientProfileId], references: [id], onDelete: Cascade)
+
+  firstName          String         @map("first_name")
+  lastName           String         @map("last_name")
+  otherNames         String?        @map("other_names")
+  designation        String?
+  residentialAddress String?        @map("residential_address")
+  phoneNumber        String?        @map("phone_number")
+  email              String?
+  mothersMaidenName  String?        @map("mothers_maiden_name")
+  gender             String?
+  dateOfBirth        DateTime?      @map("date_of_birth")
+  nationality        String?
+  stateOfOrigin      String?        @map("state_of_origin")
+  maritalStatus      MaritalStatus? @map("marital_status")
+  bvn                String?
+  nin                String?
+  idType             IdType?        @map("id_type")
+  idNumber           String?        @map("id_number")
+  idIssueDate        DateTime?      @map("id_issue_date")
+  idExpiryDate       DateTime?      @map("id_expiry_date")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([clientProfileId])
+  @@index([tenantId])
+  @@map("client_directors")
+}
+
+// Stored document reference. We don't host files — FE uploads to its
+// configured storage (S3 / DO Spaces / etc.) and POSTs the resulting URL
+// alongside the document type and scope. Adding a real upload pipeline is
+// a follow-up that doesn't change this shape.
+model ClientDocument {
+  id              String              @id @default(uuid())
+  tenantId        String              @map("tenant_id")
+  tenant          Tenant              @relation(fields: [tenantId], references: [id])
+  clientProfileId String              @map("client_profile_id")
+  clientProfile   ClientProfile       @relation(fields: [clientProfileId], references: [id], onDelete: Cascade)
+
+  type      ClientDocumentType
+  scope     ClientDocumentScope
+  // When scope = DIRECTOR, this carries the ClientDirector.id whose document
+  // this is. No formal FK — kept loose so a director row can be replaced
+  // without orphaning its docs (the FE is expected to clean up).
+  scopeRefId String? @map("scope_ref_id")
+
+  url      String
+  fileName String? @map("file_name")
+  fileSize Int?    @map("file_size")
+  mimeType String? @map("mime_type")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([clientProfileId, scope])
+  @@index([tenantId])
+  @@map("client_documents")
 }
 
 // Many-to-many: a client can focus on several commodities, and a commodity
@@ -736,6 +937,27 @@ model RefreshToken {
 
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+// Short-lived OTPs the client receives when 2FA-gated transactions are in
+// flight. SHA-256 hash of the 6-digit code is stored (never the raw code).
+// `attempts` counts wrong submissions so we can lock out a guessing bot
+// without blocking the legitimate user from requesting a fresh code.
+// `purpose` lets us pin a code to a specific transaction type — a withdrawal
+// OTP can't be replayed against a loan and vice-versa.
+model TransactionOtp {
+  id        String                @id @default(uuid())
+  userId    String                @map("user_id")
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String                @map("code_hash")
+  purpose   TransactionOtpPurpose
+  expiresAt DateTime              @map("expires_at")
+  usedAt    DateTime?             @map("used_at")
+  attempts  Int                   @default(0)
+  createdAt DateTime              @default(now()) @map("created_at")
+
+  @@index([userId, purpose, usedAt])
+  @@map("transaction_otps")
 }
 
 // One row per outstanding password-reset request. `tokenHash` is the

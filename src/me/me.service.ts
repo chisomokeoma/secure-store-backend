@@ -7,6 +7,7 @@ import {
 import { TxnType, WithdrawalStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryQueryService } from '../inventory/inventory-query.service';
+import { SecurityService } from '../security/security.service';
 import { statusesForGroup } from '../inventory/inventory.types';
 import * as bcrypt from 'bcrypt';
 
@@ -15,6 +16,7 @@ export class MeService {
   constructor(
     private prisma: PrismaService,
     private query: InventoryQueryService,
+    private security: SecurityService,
   ) {}
 
   // ── transactions (client-scoped: own deposits/withdrawals/loans/trades) ──
@@ -320,9 +322,26 @@ export class MeService {
       recentLoans,
       recentTrades,
     ] = await Promise.all([
-      this.prisma.receipt.count({ where: { tenantId, clientId: userId } }),
+      // "Total Receipts" is the user-facing card — it should match the
+      // "All" tab on the receipt-management page, which excludes SPLIT
+      // internal nodes (superseded parents that exist only as bookkeeping
+      // links to their children). Without this filter Prosper sees +1
+      // every time a withdrawal splits one of his deposits, even though
+      // the parent isn't a separate receipt from his perspective.
       this.prisma.receipt.count({
-        where: { tenantId, clientId: userId, createdAt: { gte: twoMo } },
+        where: {
+          tenantId,
+          clientId: userId,
+          status: { notIn: ['SPLIT'] },
+        },
+      }),
+      this.prisma.receipt.count({
+        where: {
+          tenantId,
+          clientId: userId,
+          status: { notIn: ['SPLIT'] },
+          createdAt: { gte: twoMo },
+        },
       }),
       this.prisma.receipt.groupBy({
         by: ['commodityId'],
@@ -589,7 +608,7 @@ export class MeService {
   }
 
   async getProfile(userId: string) {
-    return this.prisma.user.findUnique({
+    const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
         id: true,
@@ -609,8 +628,22 @@ export class MeService {
         notificationPrefs: true,
         createdAt: true,
         roles: { include: { role: { select: { name: true } } } },
+        // Project the security posture so the FE can branch the transaction
+        // submit forms. We expose `transactionPinSet` as a boolean (never the
+        // hash itself) so the settings page can render "Set PIN" vs
+        // "Change / Clear PIN" without leaking the hash.
+        twoFactorEnabled: true,
+        twoFactorEnabledAt: true,
+        transactionPinHash: true,
+        transactionPinUpdatedAt: true,
       },
     });
+    if (!user) return null;
+    const { transactionPinHash, ...rest } = user;
+    return {
+      ...rest,
+      transactionPinSet: !!transactionPinHash,
+    };
   }
 
   // ── inventory selection (warehouse → commodity → receipt cascade) ────────
@@ -756,42 +789,36 @@ export class MeService {
     return { range, granularity: monthlyish ? 'month' : 'day', total, series };
   }
 
-  async updateProfile(
-    userId: string,
-    dto: {
-      firstName?: string;
-      lastName?: string;
-      middleName?: string;
-      phoneNumber?: string;
-      contactEmail?: string;
-      profilePhotoUrl?: string;
-    },
-  ) {
-    return this.prisma.user.update({
-      where: { id: userId },
-      data: dto,
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        middleName: true,
-        phoneNumber: true,
-        contactEmail: true,
-        profilePhotoUrl: true,
-        updatedAt: true,
-      },
-    });
-  }
+  // The old `updateProfile` on this service was removed when PATCH /me was
+  // unified onto UsersService.updateMe (the canonical profile-update path
+  // with DTO validation, photo-URL whitelist, and ClientProfile mirror).
+  // If you need a "/me" alternative for something the canonical path
+  // doesn't cover, add it here — but for the standard profile fields,
+  // the controller now delegates straight to UsersService.
 
+  /**
+   * In-app password rotation. Gated by THREE proofs (same shape as
+   * UsersService.changePassword — single source of truth for this rule):
+   *   1. Current password — session-thief check.
+   *   2. OTP delivered to contactEmail — proof-of-mailbox-control. This is
+   *      the gate that stops a WM on a shared kiosk from silently rotating
+   *      the client's password. Required regardless of 2FA setting.
+   *   3. New-password strength + not-same-as-current.
+   */
   async changePassword(
     userId: string,
     currentPassword: string,
     newPassword: string,
+    otp: string,
   ) {
     if (!currentPassword || !newPassword) {
       throw new BadRequestException(
         'currentPassword and newPassword are required',
+      );
+    }
+    if (!otp) {
+      throw new BadRequestException(
+        'OTP is required to change password. Request one via POST /me/transactions/request-otp { purpose: "CHANGE_PASSWORD" }.',
       );
     }
 
@@ -816,6 +843,14 @@ export class MeService {
         'New password must be at least 8 characters with at least one uppercase letter, one lowercase letter, and one digit',
       );
     }
+
+    // OTP check is last so we don't burn an attempt against a request that
+    // would have failed for password/format reasons anyway.
+    await this.security.consumeOtp({
+      userId,
+      code: otp,
+      purpose: 'CHANGE_PASSWORD',
+    });
 
     const hashed = await bcrypt.hash(newPassword, 10);
     await this.prisma.user.update({
