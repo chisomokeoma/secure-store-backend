@@ -10,13 +10,22 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiQuery,
+  ApiBody,
+} from '@nestjs/swagger';
+import { TransactionOtpPurpose } from '@prisma/client';
 import { WarehouseManagerService } from './warehouse-manager.service';
 import {
   CreateClientDto,
   UpdateClientDto,
   CreateDepositDto,
+  EditDepositDto,
   PreviewGradingDto,
+  GetMovementDto,
 } from './dto/wm.dto';
 import { CreateWithdrawalDto } from '../withdrawals/dto/withdrawals.dto';
 import { CreateLoanDto } from '../loans/dto/loans.dto';
@@ -50,6 +59,27 @@ export class WarehouseManagerController {
   })
   getDashboard(@CurrentUser('tenantId') tenantId: string) {
     return this.service.getDashboard(tenantId);
+  }
+
+  @Get('dashboard/movement')
+  @ApiOperation({
+    summary:
+      "Filtered commodity-movement chart data. Three filter axes: ?period (preset window: 7d|30d|90d|6m|1y|ytd|all|custom), ?granularity (bucket size: day|week|month|quarter|year), and ?commodityIds (csv or repeated). When period=custom, pass ?from=YYYY-MM-DD&to=YYYY-MM-DD. Defaults: period=6m, granularity=month, all commodities — same numbers as the main dashboard's `commodityMovement`.",
+  })
+  @ApiQuery({ name: 'period', required: false })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  @ApiQuery({ name: 'granularity', required: false })
+  @ApiQuery({
+    name: 'commodityIds',
+    required: false,
+    description: 'comma-separated list of commodity ids',
+  })
+  getCommodityMovement(
+    @CurrentUser('tenantId') tenantId: string,
+    @Query() query: GetMovementDto,
+  ) {
+    return this.service.getCommodityMovement(tenantId, query);
   }
 
   @Get('clients')
@@ -346,6 +376,38 @@ export class WarehouseManagerController {
     return this.service.getClientPledgeableReceipts(tenantId, id, commodity);
   }
 
+  @Post('clients/:id/transactions/request-otp')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Request a 2FA OTP for an on-behalf transaction. OTP is delivered to the CLIENT (not the WM) — the WM asks the client to read it back so they can submit it with the create-on-behalf request. Always returns success (doesn't reveal whether the client has 2FA on).",
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['purpose'],
+      properties: {
+        purpose: {
+          type: 'string',
+          enum: ['WITHDRAWAL', 'LOAN', 'TRADE'],
+        },
+      },
+    },
+  })
+  requestClientTransactionOtp(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') managerUserId: string,
+    @Param('id') clientUserId: string,
+    @Body('purpose') purpose: TransactionOtpPurpose,
+  ) {
+    return this.service.requestClientTransactionOtp(
+      tenantId,
+      managerUserId,
+      clientUserId,
+      purpose,
+    );
+  }
+
   @Post('clients/:id/withdrawals')
   @ApiOperation({ summary: 'Create a withdrawal request on a client’s behalf' })
   createWithdrawalOnBehalf(
@@ -409,5 +471,26 @@ export class WarehouseManagerController {
     @Body() dto: CreateDepositDto,
   ) {
     return this.service.createDeposit(tenantId, userId, roles ?? [], dto);
+  }
+
+  @Patch('deposits/:receiptId')
+  @ApiOperation({
+    summary:
+      "Edit a deposit the WM filed. Permitted ONLY while the receipt is PENDING_APPROVAL — once a tenant admin has approved it, further corrections are the TA's responsibility via PATCH /admin/receipts/:id/deposit-edit. All deposit fields are editable in this state: quantity, commodityId, warehouseId, grade, dateOfDeposit, measurements. If measurements are supplied without an explicit grade, the deposit is re-scored and the new computed grade is stamped. Every edit writes an ActivityLog row with before/after of changed fields.",
+  })
+  editDeposit(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @CurrentUser('roles') roles: string[],
+    @Param('receiptId') receiptId: string,
+    @Body() dto: EditDepositDto,
+  ) {
+    return this.service.editDeposit(
+      tenantId,
+      userId,
+      roles ?? [],
+      receiptId,
+      dto,
+    );
   }
 }

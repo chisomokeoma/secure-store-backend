@@ -42,3 +42,34 @@ export class BaseResponseDto {
   success!: boolean;
   message!: string;
 }
+
+// ── Warehouse shared-credential auth ───────────────────────────────────────
+
+export class WarehouseLoginDto {
+  @IsEmail()
+  email!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  password!: string;
+}
+
+export class WarehouseChangePasswordDto {
+  @IsString()
+  @IsNotEmpty()
+  changeToken!: string;
+
+  @IsString()
+  @MinLength(8)
+  newPassword!: string;
+}
+
+export class WarehouseSelectManagerDto {
+  @IsString()
+  @IsNotEmpty()
+  selectToken!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  managerId!: string;
+}

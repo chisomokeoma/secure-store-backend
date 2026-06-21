@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Param,
   Body,
   HttpCode,
@@ -21,6 +22,7 @@ import { WithdrawalsService } from './withdrawals.service';
 import {
   CalculateWithdrawalDto,
   CreateWithdrawalDto,
+  EditWithdrawalDto,
   WithdrawalCalculationResponseDto,
   WithdrawalResponseDto,
   PaginatedWithdrawalResponseDto,
@@ -122,6 +124,27 @@ export class WithdrawalsController {
       body,
       userId,
     );
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary:
+      "Edit a previously-filed withdrawal. Permission: the owning client, a tenant admin, or a WM assigned to the held receipt's warehouse. State rules: non-admins can only edit while the withdrawal is PENDING_PAYMENT; admins can edit through PENDING_PAYMENT / PAID_PENDING_APPROVAL / APPROVED but not COMPLETED or REJECTED (terminal). Quantity is NOT editable here — reject and refile if it's wrong.",
+  })
+  editWithdrawal(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @CurrentUser('roles') roles: string[],
+    @Param('id') id: string,
+    @Body() body: EditWithdrawalDto,
+  ) {
+    return this.withdrawalsService.editWithdrawal({
+      tenantId,
+      withdrawalId: id,
+      actorUserId: userId,
+      actorRoles: roles ?? [],
+      dto: body,
+    });
   }
 
   @Post(':id/confirm-payment')

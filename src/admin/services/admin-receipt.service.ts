@@ -2,16 +2,20 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { InventoryLedgerService } from '../../inventory/inventory-ledger.service';
 import { NotificationsService } from '../../notifications/notifications.service';
+import { WarehouseManagerService } from '../../warehouse-manager/warehouse-manager.service';
 import { ReceiptStatus, WithdrawalStatus } from '@prisma/client';
 import {
   statusesForGroup,
   deriveGroup,
   HELD_STATUSES,
+  CLOSED_STATUSES,
 } from '../../inventory/inventory.types';
+import { EditDepositDto } from '../../warehouse-manager/dto/wm.dto';
 
 // A withdrawal is considered "paid" once the client (or admin) has clicked
 // `confirm-payment`. The TA's approve button should be enabled at this point
@@ -41,6 +45,7 @@ export class AdminReceiptService {
     private prisma: PrismaService,
     private ledger: InventoryLedgerService,
     private notifications: NotificationsService,
+    private warehouseManager: WarehouseManagerService,
   ) {}
 
   /** Active storage-fee policy with fallback chain; null if none configured. */
@@ -166,6 +171,7 @@ export class AdminReceiptService {
             id: r.sourceEvent.actor.id,
             name: `${r.sourceEvent.actor.firstName} ${r.sourceEvent.actor.lastName}`,
             managerCode: r.sourceEvent.actor.managerCode,
+            profilePhotoUrl: r.sourceEvent.actor.profilePhotoUrl ?? null,
           }
         : null,
       storageFeePolicy: policy
@@ -247,6 +253,7 @@ export class AdminReceiptService {
                   firstName: true,
                   lastName: true,
                   managerCode: true,
+                  profilePhotoUrl: true,
                 },
               },
             },
@@ -299,6 +306,7 @@ export class AdminReceiptService {
                 firstName: true,
                 lastName: true,
                 managerCode: true,
+                profilePhotoUrl: true,
               },
             },
           },
@@ -334,6 +342,7 @@ export class AdminReceiptService {
                 firstName: true,
                 lastName: true,
                 managerCode: true,
+                profilePhotoUrl: true,
               },
             },
           },
@@ -351,6 +360,133 @@ export class AdminReceiptService {
         request: requestByReceipt.get(r.id) ?? null,
       })),
     );
+  }
+
+  // ─── STATS ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Counts for the four receipt-management header cards: total, active,
+   * approved, pending/rejected. SPLIT internal nodes are excluded from every
+   * count so the numbers reflect what the UI actually shows.
+   *
+   * `pendingOrRejected` is the combined PENDING+REJECTED number the FE's
+   * fourth card displays; we also break the parts out so a future card design
+   * can branch on them without another request.
+   */
+  async getReceiptStats(tenantId: string) {
+    const baseWhere = {
+      tenantId,
+      status: { notIn: [ReceiptStatus.SPLIT] },
+    };
+    const [
+      totalReceipts,
+      activeReceipts,
+      approvedReceipts,
+      pendingReceipts,
+      rejectedReceipts,
+    ] = await Promise.all([
+      this.prisma.receipt.count({ where: baseWhere }),
+      this.prisma.receipt.count({
+        where: { ...baseWhere, status: ReceiptStatus.ACTIVE },
+      }),
+      this.prisma.receipt.count({
+        where: { ...baseWhere, approvalStatus: 'APPROVED' },
+      }),
+      this.prisma.receipt.count({
+        where: { ...baseWhere, approvalStatus: 'PENDING' },
+      }),
+      this.prisma.receipt.count({
+        where: { ...baseWhere, approvalStatus: 'REJECTED' },
+      }),
+    ]);
+    return {
+      totalReceipts,
+      activeReceipts,
+      approvedReceipts,
+      pendingReceipts,
+      rejectedReceipts,
+      pendingOrRejected: pendingReceipts + rejectedReceipts,
+    };
+  }
+
+  // ─── DEPOSIT EDIT (TA-side) ───────────────────────────────────────────────
+
+  /**
+   * Tenant-admin edit of a previously-filed deposit. The TA can correct
+   * deposit details as long as the receipt is still part of the live tree
+   * — i.e. not yet in a terminal state and not a superseded SPLIT internal
+   * node. Field restrictions apply per state:
+   *
+   *   PENDING_APPROVAL: every field editable (same scope as the WM endpoint).
+   *
+   *   ACTIVE:           grade / measurements / dateOfDeposit / editReason only.
+   *                     quantity / commodityId / warehouseId are immutable
+   *                     once the receipt is live in the tree — changing them
+   *                     would invalidate downstream balance math and the
+   *                     ledger's lineage. If the data is THAT wrong, reject
+   *                     the receipt and have the WM refile.
+   *
+   *   HELD_*:           refused. There's a withdrawal / loan / trade
+   *                     in flight against this receipt; mutating it would
+   *                     desync the linked transaction. Release the hold
+   *                     first (reject the withdrawal etc.), then edit.
+   *
+   *   SPLIT / terminal: refused. The receipt is no longer the live leaf —
+   *                     edits on superseded parents or closed nodes are
+   *                     nonsensical.
+   *
+   * Audit + notifications are handled by the shared `applyDepositEdit`
+   * helper on WarehouseManagerService.
+   */
+  async editDepositAsAdmin(
+    tenantId: string,
+    adminUserId: string,
+    receiptId: string,
+    dto: EditDepositDto,
+  ) {
+    const receipt = await this.warehouseManager.loadDepositForEdit(
+      tenantId,
+      receiptId,
+    );
+    if (!receipt) throw new NotFoundException('Deposit not found');
+
+    if (receipt.status === ReceiptStatus.SPLIT) {
+      throw new ConflictException(
+        'This receipt has been superseded by child receipts and cannot be edited.',
+      );
+    }
+    if (CLOSED_STATUSES.includes(receipt.status)) {
+      throw new ConflictException(
+        `This receipt is ${receipt.status} (a terminal state) and cannot be edited.`,
+      );
+    }
+    if (HELD_STATUSES.includes(receipt.status)) {
+      throw new ConflictException(
+        `A transaction is in flight against this receipt (${receipt.status}). Release the hold first, then edit.`,
+      );
+    }
+
+    // ACTIVE: lock down the structural fields. Only the data-correction
+    // fields (grade / measurements / dateOfDeposit / editReason) are honoured.
+    if (receipt.status === ReceiptStatus.ACTIVE) {
+      const disallowed: string[] = [];
+      if (dto.quantity !== undefined) disallowed.push('quantity');
+      if (dto.commodityId !== undefined) disallowed.push('commodityId');
+      if (dto.warehouseId !== undefined) disallowed.push('warehouseId');
+      if (disallowed.length) {
+        throw new BadRequestException(
+          `Cannot edit ${disallowed.join(', ')} on an ACTIVE receipt. Reject the deposit and refile if structural data needs to change.`,
+        );
+      }
+    }
+
+    return this.warehouseManager.applyDepositEdit({
+      tenantId,
+      receipt,
+      dto,
+      actorUserId: adminUserId,
+      actorKind: 'TA',
+    });
   }
 
   // ─── APPROVE ───────────────────────────────────────────────────────────────

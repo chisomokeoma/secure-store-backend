@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Body,
   Param,
   Query,
@@ -15,6 +16,7 @@ import {
   ApiBody,
 } from '@nestjs/swagger';
 import { AdminReceiptService } from '../services/admin-receipt.service';
+import { EditDepositDto } from '../../warehouse-manager/dto/wm.dto';
 import { JwtAuthGuard } from '../../auth/jwt.guard';
 import { RolesGuard } from '../../auth/roles.guard';
 import { Roles } from '../../auth/roles.decorator';
@@ -59,6 +61,15 @@ export class AdminReceiptController {
     });
   }
 
+  @Get('stats')
+  @ApiOperation({
+    summary:
+      'Receipt-management header counts (total, active, approved, pending/rejected). SPLIT internal nodes are excluded from every count.',
+  })
+  getReceiptStats(@CurrentUser('tenantId') tenantId: string) {
+    return this.adminReceiptService.getReceiptStats(tenantId);
+  }
+
   @Get('pending-approvals')
   @ApiOperation({ summary: 'List receipts awaiting admin approval' })
   getPendingApprovals(@CurrentUser('tenantId') tenantId: string) {
@@ -72,6 +83,20 @@ export class AdminReceiptController {
     @Param('id') id: string,
   ) {
     return this.adminReceiptService.getReceiptById(tenantId, id);
+  }
+
+  @Patch(':id/deposit-edit')
+  @ApiOperation({
+    summary:
+      "Edit a deposit as tenant admin. Allowed states: PENDING_APPROVAL (all fields editable) and ACTIVE (only grade / measurements / dateOfDeposit / editReason — structural fields are locked once the receipt is live). HELD_* states require the in-flight transaction to be released first. SPLIT and terminal states are refused. If measurements are supplied without an explicit grade, the deposit is re-scored. Every edit writes an ActivityLog row + notifies the client and the WM who originally filed it.",
+  })
+  editDepositAsAdmin(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body() dto: EditDepositDto,
+  ) {
+    return this.adminReceiptService.editDepositAsAdmin(tenantId, userId, id, dto);
   }
 
   @Post(':id/approve')

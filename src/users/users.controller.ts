@@ -42,7 +42,10 @@ export class UsersController {
 
   @Post('me/change-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Change user password' })
+  @ApiOperation({
+    summary:
+      "Change the current user's password. Requires the current password AND a 6-digit OTP delivered to the user's contactEmail (request one via POST /me/transactions/request-otp { purpose: 'CHANGE_PASSWORD' }). The OTP is required regardless of whether 2FA on transactions is enabled — it's a step-up gate that prevents a WM or session-thief from silently rotating someone else's password.",
+  })
   @ApiResponse({ status: 200, type: BaseResponseDto })
   changePassword(
     @CurrentUser('id') userId: string,
@@ -50,8 +53,9 @@ export class UsersController {
   ) {
     return this.usersService.changePassword(
       userId,
-      body.oldPassword,
+      body.currentPassword,
       body.newPassword,
+      body.otp,
     );
   }
 

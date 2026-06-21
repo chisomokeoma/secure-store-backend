@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Param,
   Query,
   Body,
@@ -23,6 +24,7 @@ import {
   PledgeableReceiptDto,
   CalculateLoanDto,
   CreateLoanDto,
+  EditLoanDto,
   LoanCalculationResponseDto,
   LoanResponseDto,
 } from './dto/loans.dto';
@@ -80,6 +82,27 @@ export class LoansController {
     @Body() body: CreateLoanDto,
   ) {
     return this.loansService.createLoan(tenantId, body, userId);
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary:
+      "Edit a previously-filed loan. Permission: the owning client, a tenant admin, or a WM assigned to the pledged receipt's warehouse. State rules: non-admins can only edit while the loan is PENDING; admins can edit through PENDING / APPROVED / ACTIVE but not terminal states (REPAID, DEFAULTED, REJECTED, CANCELLED). amount + financierId are edit-locked after PENDING; notes remain editable. When amount or financierId change in PENDING, totalInterest / monthlyPayment / tenureMonths are recomputed.",
+  })
+  editLoan(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @CurrentUser('roles') roles: string[],
+    @Param('id') id: string,
+    @Body() body: EditLoanDto,
+  ) {
+    return this.loansService.editLoan({
+      tenantId,
+      loanId: id,
+      actorUserId: userId,
+      actorRoles: roles ?? [],
+      dto: body,
+    });
   }
 
   @Post(':id/approve')

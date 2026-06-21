@@ -99,6 +99,18 @@ export class AdminWarehouseController {
     return this.service.getWarehouseManagers(tenantId, id);
   }
 
+  @Get(':id/commodities')
+  @ApiOperation({
+    summary:
+      "Commodities explicitly linked to this warehouse (i.e. the ones it's configured to accept deposits for). NOT the tenant-wide list — use GET /admin/grading/commodities for that. Sibling of :id/receipts and :id/managers.",
+  })
+  getWarehouseCommodities(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.service.getWarehouseCommodities(tenantId, id);
+  }
+
   @Post()
   @ApiOperation({ summary: 'Create a new warehouse' })
   @ApiBody({
@@ -150,6 +162,41 @@ export class AdminWarehouseController {
     @Body('managerIds') managerIds: string[],
   ) {
     return this.service.assignManagers(tenantId, id, managerIds, userId);
+  }
+
+  @Patch(':id/credentials')
+  @ApiOperation({
+    summary:
+      "Set or rotate the shared warehouse credential (email + initial password). The initial password is returned ONCE — record it before leaving the page. After this call mustChangePassword=true, so the first sign-in via POST /auth/warehouse-login will force a fresh password. Pass `password` to set an explicit value; omit it to have the server generate a 10-char temp.",
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['email'],
+      properties: {
+        email: { type: 'string', format: 'email' },
+        password: { type: 'string', minLength: 8 },
+      },
+    },
+  })
+  setWarehouseCredentials(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+    @Body() body: { email: string; password?: string },
+  ) {
+    return this.service.setWarehouseCredentials(tenantId, id, body);
+  }
+
+  @Post(':id/credentials/reset-password')
+  @ApiOperation({
+    summary:
+      "Rotate the warehouse password without changing the email. Returns the new initial password ONCE. The next sign-in will force a password change. Use this when the prior team's credential may have leaked.",
+  })
+  resetWarehousePassword(
+    @CurrentUser('tenantId') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    return this.service.resetWarehousePassword(tenantId, id);
   }
 
   @Post(':id/commodities')

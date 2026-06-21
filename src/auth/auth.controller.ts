@@ -20,8 +20,12 @@ import {
   AuthResponseDto,
   BaseResponseDto,
   UserProfileDto,
+  WarehouseLoginDto,
+  WarehouseChangePasswordDto,
+  WarehouseSelectManagerDto,
 } from './dto/auth.dto';
 import { AuthService } from './auth.service';
+import { WarehouseAuthService } from './warehouse-auth.service';
 import { JwtAuthGuard } from './jwt.guard';
 import { CurrentUser } from '../common/decorators/user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -31,6 +35,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
+    private readonly warehouseAuth: WarehouseAuthService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -77,6 +82,38 @@ export class AuthController {
   @ApiResponse({ status: 200, type: BaseResponseDto })
   resetPassword(@Body() body: ResetPasswordDto): Promise<BaseResponseDto> {
     return this.authService.resetPassword(body.token, body.newPassword);
+  }
+
+  // ── Warehouse shared-credential login ───────────────────────────────────
+
+  @Post('warehouse-login')
+  @ApiOperation({
+    summary:
+      "Step 1 of the warehouse shared-credential flow. Verifies the warehouse email + password. If mustChangePassword=true (just-assigned, or initial setup): returns { mustChangePassword: true, changeToken } — call /warehouse-login/change-password next. Otherwise: returns { managers, selectToken } — show the 'Who are you?' picker and call /warehouse-login/select-manager next.",
+  })
+  warehouseLogin(@Body() body: WarehouseLoginDto) {
+    return this.warehouseAuth.warehouseLogin(body.email, body.password);
+  }
+
+  @Post('warehouse-login/change-password')
+  @ApiOperation({
+    summary:
+      "Step 1b: consume a `changeToken` from /warehouse-login, set a new warehouse password (min 8 chars, mixed case + digit), and progress to the select step. Returns { managers, selectToken } on success.",
+  })
+  warehouseChangePassword(@Body() body: WarehouseChangePasswordDto) {
+    return this.warehouseAuth.changeWarehousePassword(
+      body.changeToken,
+      body.newPassword,
+    );
+  }
+
+  @Post('warehouse-login/select-manager')
+  @ApiOperation({
+    summary:
+      "Step 2: consume a `selectToken` + the chosen manager's id. The chosen manager must be currently assigned to the warehouse. Returns a full session JWT with sub=managerUserId — every CurrentUser('id') downstream resolves to the specific human, preserving the audit chain.",
+  })
+  warehouseSelectManager(@Body() body: WarehouseSelectManagerDto) {
+    return this.warehouseAuth.selectManager(body.selectToken, body.managerId);
   }
 
   @Get('me')

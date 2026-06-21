@@ -16,7 +16,16 @@ import {
   deriveGroup,
   HELD_STATUSES,
 } from '../inventory/inventory.types';
-import { ReceiptStatus, TxnType, WithdrawalStatus } from '@prisma/client';
+import { Prisma, ReceiptStatus, TxnType, WithdrawalStatus } from '@prisma/client';
+
+// Concrete type for a receipt loaded by `loadDepositForEdit` — includes the
+// commodity and its grading parameters so `applyDepositEdit` can re-score
+// measurements without an extra round-trip. Pulled out as a Prisma payload
+// type so it doesn't depend on `this`, which TS doesn't allow inside method
+// parameter type annotations.
+export type EditableDepositReceipt = Prisma.ReceiptGetPayload<{
+  include: { commodity: { include: { gradingParameters: true } } };
+}>;
 import { scoreSample } from '../grading/grading.scorer';
 import { WarehouseScopeService } from './warehouse-scope.service';
 import { WithdrawalsService } from '../withdrawals/withdrawals.service';
@@ -24,13 +33,20 @@ import { LoansService } from '../loans/loans.service';
 import { TradesService } from '../trades/trades.service';
 import { StorageFeesService } from '../storage-fees/storage-fees.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SecurityService } from '../security/security.service';
+import { EmailService } from '../email/email.service';
+import { StorageService } from '../storage/storage.service';
+import { TransactionOtpPurpose } from '@prisma/client';
 import { CreateWithdrawalDto } from '../withdrawals/dto/withdrawals.dto';
 import { CreateLoanDto } from '../loans/dto/loans.dto';
 import {
   CreateClientDto,
   UpdateClientDto,
   CreateDepositDto,
+  EditDepositDto,
   PreviewGradingDto,
+  GetMovementDto,
+  MovementGranularity,
 } from './dto/wm.dto';
 
 const ADMIN_ROLES = ['TENANT_ADMIN', 'GLOBAL_ADMIN'];
@@ -47,6 +63,9 @@ export class WarehouseManagerService {
     private trades: TradesService,
     private storageFees: StorageFeesService,
     private notifications: NotificationsService,
+    private security: SecurityService,
+    private email: EmailService,
+    private storage: StorageService,
   ) {}
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -135,8 +154,36 @@ export class WarehouseManagerService {
       throw new BadRequestException('CLIENT role not configured. Run seed.');
     }
 
+    const mode = dto.mode ?? 'INDIVIDUAL';
+
+    // ── Org-mode functional requirements ────────────────────────────────────
+    // The DTO marks everything optional so a partial draft validates, but
+    // ORGANIZATION creates can't proceed without the core corporate fields.
+    if (mode === 'ORGANIZATION') {
+      if (!dto.rcNumber?.trim()) {
+        throw new BadRequestException(
+          'rcNumber is required for ORGANIZATION clients.',
+        );
+      }
+      if (!dto.companyName?.trim()) {
+        throw new BadRequestException(
+          'companyName is required for ORGANIZATION clients.',
+        );
+      }
+      if (
+        dto.companyCategory === 'OTHER' &&
+        !dto.companyCategoryOther?.trim()
+      ) {
+        throw new BadRequestException(
+          'companyCategoryOther is required when companyCategory = OTHER.',
+        );
+      }
+    }
+
     // Login email is ALWAYS @securestore.com (system-issued identity); any
-    // email the form provided is kept only as the contact email.
+    // email the form provided is kept only as the contact email. For
+    // ORGANIZATION clients the rep's first/last name drives the login —
+    // matches the INDIVIDUAL pattern so downstream code doesn't branch.
     const email = await this.deriveLoginEmail(dto.firstName, dto.lastName);
     const tempPassword = this.generateTempPassword();
     const passwordHash = await bcrypt.hash(tempPassword, 10);
@@ -157,6 +204,45 @@ export class WarehouseManagerService {
       }
     }
 
+    // Directors / documents passed in this call (ORGANIZATION only — they're
+    // silently ignored for INDIVIDUAL clients to keep the contract relaxed).
+    const directors = mode === 'ORGANIZATION' ? dto.directors ?? [] : [];
+    const documents = mode === 'ORGANIZATION' ? dto.documents ?? [] : [];
+
+    // Validate any document with scope=DIRECTOR carries a directorRef that
+    // matches one of the supplied directors — caught here so we don't open
+    // the transaction just to fail late.
+    const directorRefs = new Set(
+      directors.map((d) => d.ref).filter((r): r is string => !!r),
+    );
+    for (const doc of documents) {
+      if (doc.scope === 'DIRECTOR') {
+        if (!doc.directorRef) {
+          throw new BadRequestException(
+            'documents with scope=DIRECTOR must include directorRef.',
+          );
+        }
+        if (!directorRefs.has(doc.directorRef)) {
+          throw new BadRequestException(
+            `documents[].directorRef='${doc.directorRef}' does not match any director.ref in this payload.`,
+          );
+        }
+      }
+    }
+
+    // ── File-URL validation ──────────────────────────────────────────────
+    // Every URL the FE sends here must be one our storage layer issued via
+    // POST /storage/upload. Any other URL — pre-existing, externally hosted,
+    // typo'd, mocked — is rejected. This turns "ClientDocument.url accepts
+    // anything" into "must be a URL we recognise and whose file exists."
+    // Cheap (single round-trip per URL); bails before any DB write so a
+    // bad payload never produces a half-committed client row.
+    await this.storage.assertOwnedUrls([
+      dto.profilePhotoUrl,
+      dto.idDocumentUrl,
+      ...documents.map((d) => d.url),
+    ]);
+
     const profile = await this.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
@@ -174,12 +260,13 @@ export class WarehouseManagerService {
           roles: { create: { roleId: role.id } },
         },
       });
-      return tx.clientProfile.create({
+      const newProfile = await tx.clientProfile.create({
         data: {
           userId: user.id,
           tenantId,
           clientCode,
-          type: dto.type ?? 'FARMER',
+          mode,
+          type: dto.type ?? (mode === 'ORGANIZATION' ? 'COMPANY' : 'FARMER'),
           occupation: dto.occupation,
           description: dto.description,
           nationality: dto.nationality,
@@ -197,6 +284,30 @@ export class WarehouseManagerService {
           nokEmail: dto.nokEmail,
           nokRelationship: dto.nokRelationship,
           registeredByManagerId: managerUserId,
+
+          // Organisation block (nullable when INDIVIDUAL).
+          rcNumber: dto.rcNumber,
+          companyName: dto.companyName,
+          companyCategory: dto.companyCategory,
+          companyCategoryOther: dto.companyCategoryOther,
+          dateOfIncorporation: dto.dateOfIncorporation
+            ? new Date(dto.dateOfIncorporation)
+            : null,
+          natureOfBusiness: dto.natureOfBusiness,
+          sectorIndustry: dto.sectorIndustry,
+          businessAddress: dto.businessAddress,
+          tin: dto.tin,
+
+          // Authorised-rep / extended KYC.
+          representativeDesignation: dto.representativeDesignation,
+          otherNames: dto.otherNames,
+          mothersMaidenName: dto.mothersMaidenName,
+          maritalStatus: dto.maritalStatus,
+          idType: dto.idType,
+          idNumber: dto.idNumber,
+          idIssueDate: dto.idIssueDate ? new Date(dto.idIssueDate) : null,
+          idExpiryDate: dto.idExpiryDate ? new Date(dto.idExpiryDate) : null,
+
           focusCommodities: focusIds.length
             ? {
                 create: focusIds.map((commodityId) => ({
@@ -213,13 +324,86 @@ export class WarehouseManagerService {
           },
         },
       });
+
+      // Insert directors and map FE refs → created ids. The map is consumed
+      // by the document loop below to resolve DIRECTOR-scoped scopeRefIds.
+      const refToId = new Map<string, string>();
+      for (const d of directors) {
+        const created = await tx.clientDirector.create({
+          data: {
+            tenantId,
+            clientProfileId: newProfile.id,
+            firstName: d.firstName,
+            lastName: d.lastName,
+            otherNames: d.otherNames,
+            designation: d.designation,
+            residentialAddress: d.residentialAddress,
+            phoneNumber: d.phoneNumber,
+            email: d.email,
+            mothersMaidenName: d.mothersMaidenName,
+            gender: d.gender,
+            dateOfBirth: d.dateOfBirth ? new Date(d.dateOfBirth) : null,
+            nationality: d.nationality,
+            stateOfOrigin: d.stateOfOrigin,
+            maritalStatus: d.maritalStatus,
+            bvn: d.bvn,
+            nin: d.nin,
+            idType: d.idType,
+            idNumber: d.idNumber,
+            idIssueDate: d.idIssueDate ? new Date(d.idIssueDate) : null,
+            idExpiryDate: d.idExpiryDate ? new Date(d.idExpiryDate) : null,
+          },
+        });
+        if (d.ref) refToId.set(d.ref, created.id);
+      }
+
+      // Insert documents. DIRECTOR-scoped docs resolve their `scopeRefId`
+      // from the ref→id map; COMPANY/REPRESENTATIVE docs leave it null.
+      if (documents.length) {
+        await tx.clientDocument.createMany({
+          data: documents.map((doc) => ({
+            tenantId,
+            clientProfileId: newProfile.id,
+            type: doc.type,
+            scope: doc.scope,
+            scopeRefId:
+              doc.scope === 'DIRECTOR' && doc.directorRef
+                ? refToId.get(doc.directorRef)!
+                : null,
+            url: doc.url,
+            fileName: doc.fileName,
+            fileSize: doc.fileSize,
+            mimeType: doc.mimeType,
+          })),
+        });
+      }
+
+      return newProfile;
     });
 
-    // ── Notifications (best-effort; never blocks the response) ─────────────
-    // 1) The new client: their credentials have been issued (the FE shows the
-    //    temp password once on screen, but the bell carries the welcome record).
-    // 2) Tenant admins: a new client has been registered on the platform.
+    // ── Welcome email + notifications (best-effort; never blocks the response)
+    // The welcome email carries the login alias + temp password to the
+    // client's REAL inbox — so the credentials reach them directly without
+    // the WM having to relay them over insecure channels (WhatsApp, voice,
+    // sticky note). This also establishes that SecureStore mail will come
+    // from this sender, which matters when we then ask them to verify a
+    // password change via OTP delivered to the same inbox.
     const clientName = `${dto.firstName} ${dto.lastName}`;
+    if (dto.email) {
+      const signInUrl =
+        (process.env.FRONTEND_URL ?? 'http://localhost:3001').replace(
+          /\/+$/,
+          '',
+        ) + '/login';
+      void this.email.sendWelcomeEmail({
+        to: dto.email,
+        firstName: dto.firstName,
+        loginEmail: email,
+        tempPassword,
+        clientCode: profile.clientCode,
+        signInUrl,
+      });
+    }
     void this.notifications.notifyUser(profile.userId, {
       tenantId,
       type: 'CLIENT_CREDENTIALS_ISSUED',
@@ -239,8 +423,23 @@ export class WarehouseManagerService {
     return {
       clientId: profile.userId,
       clientCode: profile.clientCode,
-      name: clientName,
+      mode: profile.mode,
+      // For ORGANIZATION clients `name` is the company name (what the FE
+      // surfaces in lists); the rep's name lives in `representative`.
+      name:
+        profile.mode === 'ORGANIZATION'
+          ? (profile.companyName ?? clientName)
+          : clientName,
       type: profile.type,
+      ...(profile.mode === 'ORGANIZATION'
+        ? {
+            companyName: profile.companyName,
+            rcNumber: profile.rcNumber,
+            representative: { name: clientName },
+            directorsCount: directors.length,
+            documentsCount: documents.length,
+          }
+        : {}),
       focusCommodities: profile.focusCommodities.map((f) => f.commodity),
       credentials: { email, tempPassword }, // shown ONCE
     };
@@ -1363,11 +1562,17 @@ export class WarehouseManagerService {
           createdAt: { gte: sixMo },
           ...whR,
         },
-        select: { createdAt: true, quantity: true },
+        // commodityId surfaces so we can break the bucket down per-commodity
+        // (with its own unit), instead of summing mixed-unit quantities.
+        select: { createdAt: true, quantity: true, commodityId: true },
       }),
       this.prisma.withdrawal.findMany({
         where: { tenantId, createdAt: { gte: sixMo }, ...whT },
-        select: { createdAt: true, quantity: true },
+        select: {
+          createdAt: true,
+          quantity: true,
+          receipt: { select: { commodityId: true } },
+        },
       }),
     ]);
 
@@ -1405,18 +1610,85 @@ export class WarehouseManagerService {
     );
     const ym = (d: Date) =>
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    const moveMap = new Map<
-      string,
-      { month: string; deposits: number; withdrawals: number }
-    >();
-    const bucket = (d: Date) => {
+
+    // ── Movement bucket — TWO accumulators per month ────────────────────────
+    //
+    // The legacy fields (`deposits`, `withdrawals`) sum quantities. They're
+    // kept for backward compatibility (FE chart still works), but they're
+    // dimensionally mixed: 500 KG of Maize + 5 MT of Rice + 50 BAG of Cement
+    // get added together as if they were the same unit. The number can shift
+    // purely because the commodity mix did.
+    //
+    // The new fields restore honesty:
+    //   - `depositCount` / `withdrawalCount` — raw row counts, the "how
+    //     often" your eye expected when looking at "1800 deposits".
+    //   - `byCommodity[]` — per-commodity rows with their own UNIT. The
+    //     FE renders one chart series per commodity and the eye compares
+    //     them correctly.
+    interface CommodityBucket {
+      deposits: number;
+      withdrawals: number;
+      depositCount: number;
+      withdrawalCount: number;
+    }
+    interface MovementBucket {
+      month: string;
+      deposits: number;
+      withdrawals: number;
+      depositCount: number;
+      withdrawalCount: number;
+      byCommodity: Map<string, CommodityBucket>;
+    }
+    const moveMap = new Map<string, MovementBucket>();
+    const bucket = (d: Date): MovementBucket => {
       const k = ym(d);
-      if (!moveMap.has(k))
-        moveMap.set(k, { month: k, deposits: 0, withdrawals: 0 });
-      return moveMap.get(k)!;
+      let row = moveMap.get(k);
+      if (!row) {
+        row = {
+          month: k,
+          deposits: 0,
+          withdrawals: 0,
+          depositCount: 0,
+          withdrawalCount: 0,
+          byCommodity: new Map(),
+        };
+        moveMap.set(k, row);
+      }
+      return row;
     };
-    for (const r of depMoves) bucket(r.createdAt).deposits += Number(r.quantity);
-    for (const w of wdrMoves) bucket(w.createdAt).withdrawals += w.quantity;
+    const perComm = (
+      row: MovementBucket,
+      commodityId: string,
+    ): CommodityBucket => {
+      let pc = row.byCommodity.get(commodityId);
+      if (!pc) {
+        pc = {
+          deposits: 0,
+          withdrawals: 0,
+          depositCount: 0,
+          withdrawalCount: 0,
+        };
+        row.byCommodity.set(commodityId, pc);
+      }
+      return pc;
+    };
+    for (const r of depMoves) {
+      const row = bucket(r.createdAt);
+      const qty = Number(r.quantity);
+      row.deposits += qty;
+      row.depositCount += 1;
+      const pc = perComm(row, r.commodityId);
+      pc.deposits += qty;
+      pc.depositCount += 1;
+    }
+    for (const w of wdrMoves) {
+      const row = bucket(w.createdAt);
+      row.withdrawals += w.quantity;
+      row.withdrawalCount += 1;
+      const pc = perComm(row, w.receipt.commodityId);
+      pc.withdrawals += w.quantity;
+      pc.withdrawalCount += 1;
+    }
 
     return {
       cards: {
@@ -1455,9 +1727,36 @@ export class WarehouseManagerService {
         capacityMt: w.capacityMt ?? 0,
         utilizedMt: utilById.get(w.id) ?? 0,
       })),
-      commodityMovement: [...moveMap.values()].sort((a, b) =>
-        a.month.localeCompare(b.month),
-      ),
+      commodityMovement: [...moveMap.values()]
+        .sort((a, b) => a.month.localeCompare(b.month))
+        .map((row) => ({
+          month: row.month,
+          // Legacy mixed-unit quantity sums — kept so existing chart code
+          // doesn't break. New consumers should prefer `byCommodity` (units
+          // attached) or the *Count fields (dimension-free).
+          deposits: row.deposits,
+          withdrawals: row.withdrawals,
+          // Honest transaction counts.
+          depositCount: row.depositCount,
+          withdrawalCount: row.withdrawalCount,
+          // Per-commodity breakdown with each commodity's own unit. This is
+          // the truthful series the chart should render.
+          byCommodity: [...row.byCommodity.entries()].flatMap(([id, qs]) => {
+            const c = commById.get(id);
+            if (!c) return [];
+            return [
+              {
+                commodityId: id,
+                name: c.name,
+                unit: c.unitOfMeasure,
+                deposits: qs.deposits,
+                withdrawals: qs.withdrawals,
+                depositCount: qs.depositCount,
+                withdrawalCount: qs.withdrawalCount,
+              },
+            ];
+          }),
+        })),
       recentActivities: recent.slice(0, 8).map((t) => ({
         id: t.id,
         type: t.type,
@@ -1469,6 +1768,256 @@ export class WarehouseManagerService {
         date: t.date,
       })),
     };
+  }
+
+  /**
+   * Filtered time-series for the WM dashboard chart. Three filter axes:
+   *  - period:       preset window (7d / 30d / 90d / 6m / 1y / ytd / all / custom)
+   *  - granularity:  bucket size (day / week / month / quarter / year)
+   *  - commodityIds: optional subset; omit for all commodities the WM sees
+   *
+   * Defaults preserve the existing dashboard's `commodityMovement` shape
+   * (6 months × monthly × all commodities) so callers that don't filter
+   * see the same numbers.
+   *
+   * Each row carries `deposits` + `withdrawals` totals plus a per-commodity
+   * breakdown — lets the FE render a single chart, a stacked chart, or a
+   * commodity selector inside the same response.
+   *
+   * Semantics:
+   *  - "deposit" = a root receipt's creation date and its quantity
+   *    (parentReceiptId IS NULL — counts the original issuance, not splits).
+   *  - "withdrawal" = a Withdrawal row's creation date and its quantity
+   *    (counted at request time, not at dispatch — matches existing dashboard).
+   */
+  async getCommodityMovement(tenantId: string, opts: GetMovementDto) {
+    const { from, to } = this.resolveMovementWindow(opts);
+    const granularity: MovementGranularity = opts.granularity ?? 'month';
+    const commodityIds = opts.commodityIds?.length ? opts.commodityIds : null;
+
+    const scope = await this.whScope.warehouseIds(tenantId);
+    const whR = scope ? { warehouseId: { in: scope } } : {};
+    const whT = scope ? { receipt: { warehouseId: { in: scope } } } : {};
+
+    const dateRange: { gte?: Date; lte?: Date } = {};
+    if (from) dateRange.gte = from;
+    if (to) dateRange.lte = to;
+    const dateFilter = from || to ? { createdAt: dateRange } : {};
+
+    const [deposits, withdrawals, commodities] = await Promise.all([
+      this.prisma.receipt.findMany({
+        where: {
+          tenantId,
+          parentReceiptId: null,
+          ...(commodityIds ? { commodityId: { in: commodityIds } } : {}),
+          ...whR,
+          ...dateFilter,
+        },
+        select: {
+          createdAt: true,
+          quantity: true,
+          commodityId: true,
+        },
+      }),
+      this.prisma.withdrawal.findMany({
+        where: {
+          tenantId,
+          ...(commodityIds
+            ? {
+                receipt: {
+                  commodityId: { in: commodityIds },
+                  ...(scope ? { warehouseId: { in: scope } } : {}),
+                },
+              }
+            : whT),
+          ...dateFilter,
+        },
+        select: {
+          createdAt: true,
+          quantity: true,
+          receipt: { select: { commodityId: true } },
+        },
+      }),
+      this.prisma.commodity.findMany({
+        where: {
+          tenantId,
+          ...(commodityIds ? { id: { in: commodityIds } } : {}),
+        },
+        select: { id: true, name: true, unitOfMeasure: true },
+      }),
+    ]);
+
+    const commById = new Map(commodities.map((c) => [c.id, c]));
+
+    // Same dual-accumulator pattern as getDashboard: legacy mixed-unit
+    // quantity sums kept for backward compat (see comment over there for
+    // the full reasoning); honest transaction counts + per-commodity-with-
+    // unit breakdown for the new chart shape.
+    type CommodityCell = {
+      deposits: number;
+      withdrawals: number;
+      depositCount: number;
+      withdrawalCount: number;
+    };
+    type BucketRow = {
+      deposits: number;
+      withdrawals: number;
+      depositCount: number;
+      withdrawalCount: number;
+      byCommodity: Map<string, CommodityCell>;
+    };
+    const buckets = new Map<string, BucketRow>();
+    const empty = (): BucketRow => ({
+      deposits: 0,
+      withdrawals: 0,
+      depositCount: 0,
+      withdrawalCount: 0,
+      byCommodity: new Map(),
+    });
+    const get = (key: string) => {
+      let row = buckets.get(key);
+      if (!row) {
+        row = empty();
+        buckets.set(key, row);
+      }
+      return row;
+    };
+    const perComm = (row: BucketRow, commodityId: string) => {
+      let pc = row.byCommodity.get(commodityId);
+      if (!pc) {
+        pc = {
+          deposits: 0,
+          withdrawals: 0,
+          depositCount: 0,
+          withdrawalCount: 0,
+        };
+        row.byCommodity.set(commodityId, pc);
+      }
+      return pc;
+    };
+
+    for (const r of deposits) {
+      const key = this.bucketKey(r.createdAt, granularity);
+      const row = get(key);
+      const qty = Number(r.quantity);
+      row.deposits += qty;
+      row.depositCount += 1;
+      const pc = perComm(row, r.commodityId);
+      pc.deposits += qty;
+      pc.depositCount += 1;
+    }
+    for (const w of withdrawals) {
+      const key = this.bucketKey(w.createdAt, granularity);
+      const row = get(key);
+      row.withdrawals += w.quantity;
+      row.withdrawalCount += 1;
+      const pc = perComm(row, w.receipt.commodityId);
+      pc.withdrawals += w.quantity;
+      pc.withdrawalCount += 1;
+    }
+
+    const data = [...buckets.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([bucket, row]) => ({
+        bucket,
+        deposits: row.deposits,
+        withdrawals: row.withdrawals,
+        depositCount: row.depositCount,
+        withdrawalCount: row.withdrawalCount,
+        byCommodity: [...row.byCommodity.entries()].flatMap(([id, qs]) => {
+          const c = commById.get(id);
+          if (!c) return [];
+          return [
+            {
+              commodityId: id,
+              name: c.name,
+              unit: c.unitOfMeasure,
+              deposits: qs.deposits,
+              withdrawals: qs.withdrawals,
+              depositCount: qs.depositCount,
+              withdrawalCount: qs.withdrawalCount,
+            },
+          ];
+        }),
+      }));
+
+    return {
+      data,
+      meta: {
+        period: opts.period ?? '6m',
+        from: from ? from.toISOString().slice(0, 10) : null,
+        to: to ? to.toISOString().slice(0, 10) : null,
+        granularity,
+        commodityIds: commodityIds ?? [],
+      },
+    };
+  }
+
+  /**
+   * Resolve the date window from a period preset (or explicit from/to).
+   * `all` returns nulls so no date filter is applied.
+   */
+  private resolveMovementWindow(opts: GetMovementDto): {
+    from: Date | null;
+    to: Date | null;
+  } {
+    const period = opts.period ?? '6m';
+    if (period === 'custom') {
+      return {
+        from: opts.from ? new Date(opts.from) : null,
+        to: opts.to ? new Date(opts.to) : null,
+      };
+    }
+    if (period === 'all') return { from: null, to: null };
+
+    const now = new Date();
+    const from = new Date(now);
+    if (period === '7d') from.setDate(from.getDate() - 7);
+    else if (period === '30d') from.setDate(from.getDate() - 30);
+    else if (period === '90d') from.setDate(from.getDate() - 90);
+    else if (period === '6m') from.setMonth(from.getMonth() - 6);
+    else if (period === '1y') from.setFullYear(from.getFullYear() - 1);
+    else if (period === 'ytd') {
+      from.setMonth(0);
+      from.setDate(1);
+      from.setHours(0, 0, 0, 0);
+    }
+    return { from, to: now };
+  }
+
+  /**
+   * Map a date to its bucket key for the given granularity. Keys are sortable
+   * lexically so the FE can render them in chronological order without parsing:
+   *   day     → 2026-05-21
+   *   week    → 2026-W21       (ISO week number)
+   *   month   → 2026-05
+   *   quarter → 2026-Q2
+   *   year    → 2026
+   */
+  private bucketKey(d: Date, g: MovementGranularity): string {
+    const y = d.getFullYear();
+    const m = d.getMonth() + 1;
+    const day = d.getDate();
+    if (g === 'day') {
+      return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+    if (g === 'week') {
+      // ISO week: Thursday determines the year, week 1 contains Jan 4.
+      const dt = new Date(Date.UTC(y, m - 1, day));
+      const dayNum = dt.getUTCDay() || 7;
+      dt.setUTCDate(dt.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+      const week = Math.ceil(
+        ((dt.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7,
+      );
+      return `${dt.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+    }
+    if (g === 'month') return `${y}-${String(m).padStart(2, '0')}`;
+    if (g === 'quarter') {
+      const q = Math.floor((m - 1) / 3) + 1;
+      return `${y}-Q${q}`;
+    }
+    return `${y}`;
   }
 
   async getClientStats(tenantId: string, managerUserId: string) {
@@ -1500,16 +2049,30 @@ export class WarehouseManagerService {
             id: true,
             firstName: true,
             lastName: true,
+            middleName: true,
             email: true,
+            contactEmail: true,
             phoneNumber: true,
+            gender: true,
+            dateOfBirth: true,
+            profilePhotoUrl: true,
             status: true,
             residentialAddress: true,
+            // Surface the client's security posture so the WM's on-behalf
+            // form can decide whether to render the OTP step. We never expose
+            // the PIN hash to a third party — just the boolean.
+            twoFactorEnabled: true,
+            transactionPinHash: true,
           },
         },
         focusCommodities: {
           include: { commodity: { select: { id: true, name: true } } },
           orderBy: { createdAt: 'asc' },
         },
+        // ORGANIZATION-mode children. For INDIVIDUAL clients both arrays are
+        // empty so the response shape stays uniform.
+        directors: { orderBy: { createdAt: 'asc' } },
+        documents: { orderBy: { createdAt: 'asc' } },
       },
     });
     if (!profile) throw new NotFoundException('Client not found');
@@ -1542,17 +2105,54 @@ export class WarehouseManagerService {
         }),
       ]);
 
+    const repName = `${profile.user.firstName} ${profile.user.lastName}`;
+
     return {
       clientId: profile.userId,
       clientCode: profile.clientCode,
-      name: `${profile.user.firstName} ${profile.user.lastName}`,
+      mode: profile.mode,
+      // `name` is what the UI surfaces in lists / titles. For ORGANIZATION
+      // clients it's the company name; the rep's name lives under
+      // `organization.representative`.
+      name:
+        profile.mode === 'ORGANIZATION'
+          ? (profile.companyName ?? repName)
+          : repName,
+
+      // ── Discrete form fields ─────────────────────────────────────────────
+      // Surfaced as individual fields (in addition to combined `name`) so
+      // the WM's "Edit client" form can prefill each input. The previous
+      // shape only carried `name` as one string, which forced the FE to
+      // split it — fragile when middle/multi-part names are involved.
+      firstName: profile.user.firstName,
+      lastName: profile.user.lastName,
+      middleName: profile.user.middleName,
+      gender: profile.user.gender,
+      dateOfBirth: profile.user.dateOfBirth,
+      nationality: profile.nationality,
+      stateOfOrigin: profile.stateOfOrigin,
+      lga: profile.lga,
+      nationalId: profile.nationalId,
+      profilePhotoUrl: profile.user.profilePhotoUrl ?? profile.profilePhotoUrl,
+      idDocumentUrl: profile.idDocumentUrl,
+
+      // System-issued login alias + the user's real inbox. The form's
+      // "Email address" field should bind to `contactEmail`; `email` is
+      // the @securestore.com username and stays read-only.
       email: profile.user.email,
+      contactEmail: profile.user.contactEmail,
+
       phone: profile.user.phoneNumber,
       type: profile.type,
       status: profile.user.status,
       occupation: profile.occupation,
       residentialAddress: profile.user.residentialAddress,
+
+      // Two shapes for two consumers. `focusCommodities` is the {id,name}
+      // pair used by the detail view; `focusCommodityIds` is just the ids
+      // — what the multi-select on the edit form binds to as initial value.
       focusCommodities: profile.focusCommodities.map((f) => f.commodity),
+      focusCommodityIds: profile.focusCommodities.map((f) => f.commodity.id),
       bank: {
         accountName: profile.bankAccountName,
         accountNumber: profile.bankAccountNumber,
@@ -1565,7 +2165,82 @@ export class WarehouseManagerService {
         email: profile.nokEmail,
         relationship: profile.nokRelationship,
       },
+      // ORGANIZATION block. `null` when the client is INDIVIDUAL so the FE
+      // can short-circuit cleanly.
+      organization:
+        profile.mode === 'ORGANIZATION'
+          ? {
+              rcNumber: profile.rcNumber,
+              companyName: profile.companyName,
+              companyCategory: profile.companyCategory,
+              companyCategoryOther: profile.companyCategoryOther,
+              dateOfIncorporation: profile.dateOfIncorporation,
+              natureOfBusiness: profile.natureOfBusiness,
+              sectorIndustry: profile.sectorIndustry,
+              businessAddress: profile.businessAddress,
+              tin: profile.tin,
+              representative: {
+                name: repName,
+                designation: profile.representativeDesignation,
+                otherNames: profile.otherNames,
+                phoneNumber: profile.user.phoneNumber,
+                email: profile.user.email,
+                residentialAddress: profile.user.residentialAddress,
+                mothersMaidenName: profile.mothersMaidenName,
+                maritalStatus: profile.maritalStatus,
+                nationality: profile.nationality,
+                stateOfOrigin: profile.stateOfOrigin,
+                idType: profile.idType,
+                idNumber: profile.idNumber,
+                idIssueDate: profile.idIssueDate,
+                idExpiryDate: profile.idExpiryDate,
+              },
+              directors: profile.directors.map((d) => ({
+                id: d.id,
+                firstName: d.firstName,
+                lastName: d.lastName,
+                otherNames: d.otherNames,
+                designation: d.designation,
+                residentialAddress: d.residentialAddress,
+                phoneNumber: d.phoneNumber,
+                email: d.email,
+                mothersMaidenName: d.mothersMaidenName,
+                gender: d.gender,
+                dateOfBirth: d.dateOfBirth,
+                nationality: d.nationality,
+                stateOfOrigin: d.stateOfOrigin,
+                maritalStatus: d.maritalStatus,
+                bvn: d.bvn,
+                nin: d.nin,
+                idType: d.idType,
+                idNumber: d.idNumber,
+                idIssueDate: d.idIssueDate,
+                idExpiryDate: d.idExpiryDate,
+              })),
+              documents: profile.documents.map((doc) => ({
+                id: doc.id,
+                type: doc.type,
+                scope: doc.scope,
+                scopeRefId: doc.scopeRefId,
+                url: doc.url,
+                fileName: doc.fileName,
+                fileSize: doc.fileSize,
+                mimeType: doc.mimeType,
+                createdAt: doc.createdAt,
+              })),
+            }
+          : null,
       receiptStats: { active, liened, cancelled, total },
+      // Client's transaction-security posture — drives the WM on-behalf form:
+      //   • twoFactorEnabled true  → render the OTP step (WM clicks "Send OTP
+      //     to client", client reads it back, WM enters it on submit).
+      //   • twoFactorEnabled false → no OTP step, submit goes straight through.
+      // `transactionPinSet` is informational only on this view — the WM never
+      // enters the client's PIN (the on-behalf flow skips it by design).
+      security: {
+        twoFactorEnabled: profile.user.twoFactorEnabled,
+        transactionPinSet: !!profile.user.transactionPinHash,
+      },
       // Flag for the "Action needed" pill on the client-detail header.
       // Fires when the tenant admin has approved one of this client's
       // withdrawal requests and it's awaiting WM dispatch (`/complete`).
@@ -1619,18 +2294,46 @@ export class WarehouseManagerService {
     if (dto.phoneNumber !== undefined) userData.phoneNumber = dto.phoneNumber;
     if (dto.residentialAddress !== undefined)
       userData.residentialAddress = dto.residentialAddress;
+    // Profile photo MUST be mirrored to the User row too. The client's
+    // settings page reads `User.profilePhotoUrl` (via /me and /users/me);
+    // without this mirror the WM uploads an avatar but the client sees
+    // their initials. Empty string normalises to null — same convention
+    // as the self-update path in UsersService.updateMe.
+    if (dto.profilePhotoUrl !== undefined) {
+      userData.profilePhotoUrl =
+        dto.profilePhotoUrl === '' ? null : dto.profilePhotoUrl;
+    }
 
     // Peel off fields that don't belong on `clientProfile.update.data`:
     //  - the user-bound fields above
-    //  - focusCommodityIds, which is a relation replace, not a scalar
+    //  - focusCommodityIds / directors / documents — relation replaces, not scalars
+    //  - date-string fields that need parsing to Date before the update
     const {
       firstName,
       lastName,
       phoneNumber,
       residentialAddress,
       focusCommodityIds,
-      ...profileData
+      directors: directorsPatch,
+      documents: documentsPatch,
+      dateOfIncorporation,
+      idIssueDate,
+      idExpiryDate,
+      ...rest
     } = dto;
+
+    const profileData: any = { ...rest };
+    if (dateOfIncorporation !== undefined) {
+      profileData.dateOfIncorporation = dateOfIncorporation
+        ? new Date(dateOfIncorporation)
+        : null;
+    }
+    if (idIssueDate !== undefined) {
+      profileData.idIssueDate = idIssueDate ? new Date(idIssueDate) : null;
+    }
+    if (idExpiryDate !== undefined) {
+      profileData.idExpiryDate = idExpiryDate ? new Date(idExpiryDate) : null;
+    }
 
     // Validate focus ids belong to this tenant (only when caller is changing them).
     const focusIds = focusCommodityIds
@@ -1647,6 +2350,35 @@ export class WarehouseManagerService {
       }
     }
 
+    // Validate director/document cross-references the same way createClient does.
+    if (documentsPatch !== undefined) {
+      const refs = new Set(
+        (directorsPatch ?? []).map((d) => d.ref).filter((r): r is string => !!r),
+      );
+      for (const doc of documentsPatch) {
+        if (doc.scope === 'DIRECTOR') {
+          if (!doc.directorRef) {
+            throw new BadRequestException(
+              'documents with scope=DIRECTOR must include directorRef.',
+            );
+          }
+          if (directorsPatch !== undefined && !refs.has(doc.directorRef)) {
+            throw new BadRequestException(
+              `documents[].directorRef='${doc.directorRef}' does not match any director.ref in this payload.`,
+            );
+          }
+        }
+      }
+    }
+
+    // File-URL validation (same rule as createClient — only URLs our
+    // storage layer issued are accepted). Runs against whatever the caller
+    // is patching: if `documents` is omitted, we don't touch existing rows
+    // and there's nothing to validate.
+    if (documentsPatch !== undefined) {
+      await this.storage.assertOwnedUrls(documentsPatch.map((d) => d.url));
+    }
+
     await this.prisma.$transaction(async (tx) => {
       if (Object.keys(userData).length) {
         await tx.user.update({ where: { id: clientUserId }, data: userData });
@@ -1655,8 +2387,8 @@ export class WarehouseManagerService {
         where: { id: profile.id },
         data: profileData,
       });
-      // Replace the focus set when (and only when) it was supplied. Omitting
-      // the field leaves existing focus rows untouched; passing `[]` clears.
+
+      // Replace the focus set when supplied; omit to keep, `[]` to clear.
       if (focusIds !== undefined) {
         await tx.clientFocusCommodity.deleteMany({
           where: { clientProfileId: profile.id },
@@ -1669,6 +2401,72 @@ export class WarehouseManagerService {
               commodityId,
             })),
             skipDuplicates: true,
+          });
+        }
+      }
+
+      // Director replace. Same semantics as focusCommodityIds: omit to
+      // leave alone, `[]` to clear, populated array to fully replace.
+      const refToId = new Map<string, string>();
+      if (directorsPatch !== undefined) {
+        await tx.clientDirector.deleteMany({
+          where: { clientProfileId: profile.id },
+        });
+        for (const d of directorsPatch) {
+          const created = await tx.clientDirector.create({
+            data: {
+              tenantId,
+              clientProfileId: profile.id,
+              firstName: d.firstName,
+              lastName: d.lastName,
+              otherNames: d.otherNames,
+              designation: d.designation,
+              residentialAddress: d.residentialAddress,
+              phoneNumber: d.phoneNumber,
+              email: d.email,
+              mothersMaidenName: d.mothersMaidenName,
+              gender: d.gender,
+              dateOfBirth: d.dateOfBirth ? new Date(d.dateOfBirth) : null,
+              nationality: d.nationality,
+              stateOfOrigin: d.stateOfOrigin,
+              maritalStatus: d.maritalStatus,
+              bvn: d.bvn,
+              nin: d.nin,
+              idType: d.idType,
+              idNumber: d.idNumber,
+              idIssueDate: d.idIssueDate ? new Date(d.idIssueDate) : null,
+              idExpiryDate: d.idExpiryDate ? new Date(d.idExpiryDate) : null,
+            },
+          });
+          if (d.ref) refToId.set(d.ref, created.id);
+        }
+      }
+
+      // Document replace. Same semantics — DIRECTOR-scoped docs resolve
+      // scopeRefId from the ref→id map built above. If the caller is
+      // patching documents WITHOUT also patching directors, DIRECTOR-scoped
+      // docs must already use real existing director ids (we don't try to
+      // guess across calls).
+      if (documentsPatch !== undefined) {
+        await tx.clientDocument.deleteMany({
+          where: { clientProfileId: profile.id },
+        });
+        if (documentsPatch.length) {
+          await tx.clientDocument.createMany({
+            data: documentsPatch.map((doc) => ({
+              tenantId,
+              clientProfileId: profile.id,
+              type: doc.type,
+              scope: doc.scope,
+              scopeRefId:
+                doc.scope === 'DIRECTOR' && doc.directorRef
+                  ? (refToId.get(doc.directorRef) ?? doc.directorRef)
+                  : null,
+              url: doc.url,
+              fileName: doc.fileName,
+              fileSize: doc.fileSize,
+              mimeType: doc.mimeType,
+            })),
           });
         }
       }
@@ -1744,6 +2542,31 @@ export class WarehouseManagerService {
     );
   }
 
+  /**
+   * Issue a 2FA OTP for an on-behalf transaction. The OTP is sent to the
+   * CLIENT's registered channel — the WM then asks the client to read the
+   * code back so they can complete the create-on-behalf submission.
+   *
+   * Two scope checks:
+   *  1. The target client must be in the WM's scope (same warehouse roster).
+   *  2. SecurityService.requestTransactionOtp returns a generic success
+   *     either way, so the WM can't probe to learn whether a given client
+   *     has 2FA on.
+   */
+  async requestClientTransactionOtp(
+    tenantId: string,
+    managerUserId: string,
+    clientUserId: string,
+    purpose: TransactionOtpPurpose,
+  ) {
+    await this.assertClientInScope(tenantId, clientUserId);
+    return this.security.requestTransactionOtp({
+      userId: clientUserId,
+      purpose,
+      requestedByUserId: managerUserId,
+    });
+  }
+
   async createWithdrawalOnBehalf(
     tenantId: string,
     clientUserId: string,
@@ -1757,6 +2580,7 @@ export class WarehouseManagerService {
       dto,
       clientUserId,
       managerUserId,
+      { isOnBehalf: true },
     );
   }
 
@@ -1768,18 +2592,30 @@ export class WarehouseManagerService {
   ) {
     await this.assertClientInScope(tenantId, clientUserId);
     await this.assertReceiptInScope(tenantId, dto.receiptId);
-    return this.loans.createLoan(tenantId, dto, clientUserId, managerUserId);
+    return this.loans.createLoan(
+      tenantId,
+      dto,
+      clientUserId,
+      managerUserId,
+      { isOnBehalf: true },
+    );
   }
 
   async createTradeOnBehalf(
     tenantId: string,
     clientUserId: string,
     managerUserId: string,
-    dto: { receiptId: string; pricePerUnit?: number },
+    dto: { receiptId: string; pricePerUnit?: number; pin?: string; otp?: string },
   ) {
     await this.assertClientInScope(tenantId, clientUserId);
     await this.assertReceiptInScope(tenantId, dto.receiptId);
-    return this.trades.createTrade(tenantId, dto, clientUserId, managerUserId);
+    return this.trades.createTrade(
+      tenantId,
+      dto,
+      clientUserId,
+      managerUserId,
+      { isOnBehalf: true },
+    );
   }
 
   /**
@@ -2043,5 +2879,316 @@ export class WarehouseManagerService {
       message:
         'Deposit created and is PENDING_APPROVAL by a Tenant Admin.',
     };
+  }
+
+  /**
+   * WM-side deposit edit. The WM can only modify a deposit while it's still
+   * PENDING_APPROVAL — once the tenant admin has approved it, the receipt
+   * is "live" and any further data correction is the TA's responsibility
+   * (via the admin-side edit endpoint). All deposit fields are editable in
+   * this state: quantity, commodity, warehouse, grade, date, measurements.
+   *
+   * Re-scoring: if `measurements` is supplied and `grade` is NOT, we re-run
+   * the commodity's grader against the new measurements and stamp the
+   * computed grade. If both are supplied, `grade` wins and we record it
+   * as a manual override in the audit log.
+   */
+  async editDeposit(
+    tenantId: string,
+    managerUserId: string,
+    actorRoles: string[],
+    receiptId: string,
+    dto: EditDepositDto,
+  ) {
+    const receipt = await this.loadDepositForEdit(tenantId, receiptId);
+    if (!receipt) throw new NotFoundException('Deposit not found');
+
+    if (receipt.status !== 'PENDING_APPROVAL') {
+      throw new ConflictException(
+        `This deposit is already ${receipt.status} — only a tenant admin can edit it now.`,
+      );
+    }
+
+    // Scope check: the WM must be assigned to the receipt's CURRENT warehouse.
+    // (If they're moving it to a new warehouse, the destination is validated
+    // separately below; the WM must have scope at both ends.)
+    await this.assertWarehouseScope(
+      tenantId,
+      managerUserId,
+      receipt.warehouseId,
+      actorRoles,
+    );
+    if (dto.warehouseId && dto.warehouseId !== receipt.warehouseId) {
+      await this.assertWarehouseScope(
+        tenantId,
+        managerUserId,
+        dto.warehouseId,
+        actorRoles,
+      );
+    }
+
+    return this.applyDepositEdit({
+      tenantId,
+      receipt,
+      dto,
+      actorUserId: managerUserId,
+      actorKind: 'WM',
+    });
+  }
+
+  /**
+   * Shared edit implementation used by both the WM and TA endpoints. Handles
+   * destination-commodity validation, optional re-scoring, the actual
+   * Receipt update, an ActivityLog row capturing what changed (before/after
+   * + reason + actor), and the post-edit notifications.
+   *
+   * State + field restrictions are pre-enforced by the caller; this method
+   * trusts the inputs. Public so AdminReceiptService can invoke it after
+   * its own TA-side permission checks.
+   */
+  async applyDepositEdit(args: {
+    tenantId: string;
+    // Non-null receipt — callers MUST check loadDepositForEdit's null return
+    // and 404 themselves before invoking this helper.
+    receipt: EditableDepositReceipt;
+    dto: EditDepositDto;
+    actorUserId: string;
+    actorKind: 'WM' | 'TA';
+  }) {
+    const { tenantId, receipt, dto, actorUserId, actorKind } = args;
+    const isPending = receipt.status === 'PENDING_APPROVAL';
+
+    // Resolve the destination commodity. If commodityId is changing, look
+    // up the new commodity (need its grading params for re-score + unit/bag
+    // weight for downstream fee math). Otherwise reuse the loaded one.
+    let destCommodity = receipt.commodity;
+    if (dto.commodityId && dto.commodityId !== receipt.commodityId) {
+      const c = await this.prisma.commodity.findFirst({
+        where: { id: dto.commodityId, tenantId },
+        include: { gradingParameters: true },
+      });
+      if (!c) throw new BadRequestException('commodityId is not valid for this tenant.');
+      destCommodity = c;
+    }
+
+    // If the warehouse is changing (PENDING only), make sure the destination
+    // accepts the commodity. Same precondition as createDeposit.
+    if (dto.warehouseId && dto.warehouseId !== receipt.warehouseId) {
+      const wc = await this.prisma.warehouseCommodity.findUnique({
+        where: {
+          warehouseId_commodityId: {
+            warehouseId: dto.warehouseId,
+            commodityId: destCommodity.id,
+          },
+        },
+      });
+      if (!wc) {
+        throw new BadRequestException(
+          'The destination warehouse does not accept this commodity.',
+        );
+      }
+    }
+
+    // Re-score on measurement change unless the caller is explicitly
+    // overriding the grade. Existing gradingScores are kept verbatim when
+    // measurements aren't being touched, so an unchanged edit doesn't
+    // re-stamp old data.
+    let nextGrade = dto.grade ?? receipt.grade;
+    let nextScores: any = receipt.gradingScores;
+    let nextComputedGrade: string | null = receipt.computedGrade;
+    let nextTotalDefectivePct = receipt.totalDefectivePct;
+    let nextStandardDeductionPct = receipt.standardDeductionPct;
+    let gradeOverridden = !!dto.grade;
+
+    if (dto.measurements) {
+      if (!destCommodity.gradingParameters.length) {
+        throw new BadRequestException(
+          'Destination commodity has no grading parameters — cannot re-score.',
+        );
+      }
+      const params = destCommodity.gradingParameters;
+      const nameById = new Map<string, string>();
+      for (const p of params) nameById.set(p.id, p.name);
+      const unknownIds = Object.keys(dto.measurements).filter(
+        (id) => !nameById.has(id),
+      );
+      if (unknownIds.length) {
+        throw new BadRequestException(
+          `Unknown grading parameter id(s): ${unknownIds.join(', ')}`,
+        );
+      }
+      const measurementsByName: Record<string, number> = {};
+      for (const [id, value] of Object.entries(dto.measurements)) {
+        measurementsByName[nameById.get(id)!] = value;
+      }
+      let scored;
+      try {
+        scored = scoreSample({
+          parameters: destCommodity.gradingParameters.map((p) => ({
+            name: p.name,
+            unit: p.unit,
+            isDefective: p.isDefective,
+            thresholds: p.thresholds as Record<string, number>,
+          })),
+          measurements: measurementsByName,
+          numberOfGrades: destCommodity.numberOfGrades,
+        });
+      } catch (e: any) {
+        throw new BadRequestException(e.message);
+      }
+      if (scored.computedGrade === 'REJECTED') {
+        throw new BadRequestException(
+          `Edited measurements fail grading. Failing: ${(scored.failingParameters ?? []).join(', ')}`,
+        );
+      }
+      nextScores = {
+        measurementsById: dto.measurements,
+        computedGrade: scored.computedGrade,
+        totalDefectivePct: scored.totalDefectivePct,
+        standardDeductionPct: scored.standardDeductionPct,
+        perParameter: scored.perParameter,
+      };
+      nextComputedGrade = scored.computedGrade;
+      nextTotalDefectivePct = scored.totalDefectivePct;
+      nextStandardDeductionPct = scored.standardDeductionPct;
+      // Only auto-stamp the grade when the caller didn't manually override.
+      if (!dto.grade) nextGrade = scored.computedGrade;
+    }
+
+    // Build the actual update payload — diff-driven so we only touch fields
+    // the caller is changing. Capture before/after for the audit log.
+    const beforeAfter: Record<string, { from: unknown; to: unknown }> = {};
+    const updateData: any = {};
+
+    const setIfChanged = <K extends keyof typeof receipt>(
+      key: K,
+      next: unknown,
+      transform: (v: unknown) => unknown = (v) => v,
+    ) => {
+      const current = receipt[key];
+      const incoming = transform(next);
+      if (incoming === undefined) return;
+      if (
+        (current instanceof Date
+          ? current.toISOString()
+          : current) !==
+        (incoming instanceof Date ? incoming.toISOString() : incoming)
+      ) {
+        beforeAfter[key as string] = { from: current as unknown, to: incoming };
+        updateData[key as string] = incoming;
+      }
+    };
+
+    setIfChanged('quantity', dto.quantity);
+    setIfChanged('commodityId', dto.commodityId);
+    setIfChanged('warehouseId', dto.warehouseId);
+    setIfChanged('grade', nextGrade);
+    setIfChanged('dateOfDeposit', dto.dateOfDeposit, (v) =>
+      v ? new Date(v as string) : undefined,
+    );
+    // gradingScores / computedGrade / def pcts only change when we re-scored.
+    if (dto.measurements) {
+      setIfChanged('gradingScores', nextScores);
+      setIfChanged('computedGrade', nextComputedGrade);
+      setIfChanged('totalDefectivePct', nextTotalDefectivePct);
+      setIfChanged('standardDeductionPct', nextStandardDeductionPct);
+    }
+
+    if (!Object.keys(updateData).length) {
+      // Nothing actually changed — return early without an audit row so
+      // we don't pollute the log with no-op edits.
+      return {
+        receiptId: receipt.id,
+        receiptNumber: receipt.receiptNumber,
+        status: receipt.status,
+        message: 'No changes to apply.',
+      };
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.receipt.update({
+        where: { id: receipt.id },
+        data: updateData,
+      });
+      await tx.activityLog.create({
+        data: {
+          tenantId,
+          userId: actorUserId,
+          action: 'RECEIPT_DEPOSIT_EDITED',
+          entityType: 'Receipt',
+          entityId: receipt.id,
+          metadata: {
+            actorKind,
+            stateAtEdit: receipt.status,
+            changes: beforeAfter,
+            gradeOverridden,
+            editReason: dto.editReason ?? null,
+          } as any,
+        },
+      });
+      return u;
+    });
+
+    // ── Notifications (best-effort, never blocks the response) ─────────────
+    if (isPending) {
+      // PENDING edit: keep the tenant admins informed — the data they're
+      // about to approve has just changed.
+      void this.notifications.notifyTenantAdmins(tenantId, {
+        type: 'DEPOSIT_PENDING_APPROVAL',
+        title: 'Pending deposit updated',
+        body: `${updated.receiptNumber}: deposit details edited prior to approval.`,
+        relatedEntityType: 'receipt',
+        relatedEntityId: receipt.id,
+        data: { changedFields: Object.keys(beforeAfter) },
+      });
+    } else {
+      // ACTIVE edit (TA path): the client and the filing WM need to know.
+      void this.notifications.notifyUser(receipt.clientId, {
+        tenantId,
+        type: 'DEPOSIT_APPROVED',
+        title: 'Your approved deposit was edited',
+        body: `${updated.receiptNumber}: a tenant admin updated this receipt's details. View the receipt to see the changes.`,
+        relatedEntityType: 'receipt',
+        relatedEntityId: receipt.id,
+        data: { changedFields: Object.keys(beforeAfter) },
+      });
+      const filingWm = await this.prisma.inventoryEvent.findFirst({
+        where: { fromReceiptId: receipt.id, eventType: 'DEPOSIT' },
+        select: { actorUserId: true },
+      });
+      if (filingWm?.actorUserId && filingWm.actorUserId !== actorUserId) {
+        void this.notifications.notifyUser(filingWm.actorUserId, {
+          tenantId,
+          type: 'DEPOSIT_APPROVED',
+          title: 'A deposit you filed was edited',
+          body: `${updated.receiptNumber}: a tenant admin corrected details on this receipt.`,
+          relatedEntityType: 'receipt',
+          relatedEntityId: receipt.id,
+          data: { changedFields: Object.keys(beforeAfter) },
+        });
+      }
+    }
+
+    return {
+      receiptId: updated.id,
+      receiptNumber: updated.receiptNumber,
+      status: updated.status,
+      approvalStatus: updated.approvalStatus,
+      changedFields: Object.keys(beforeAfter),
+      message: 'Deposit updated.',
+    };
+  }
+
+  /**
+   * Loader used by both WM (editDeposit above) and TA (admin-receipt
+   * service's editDepositAsAdmin) so the receipt's type is exactly what
+   * `applyDepositEdit` expects (the commodity + its grading parameters).
+   * Public for cross-module reuse.
+   */
+  async loadDepositForEdit(tenantId: string, receiptId: string) {
+    return this.prisma.receipt.findFirst({
+      where: { id: receiptId, tenantId },
+      include: { commodity: { include: { gradingParameters: true } } },
+    });
   }
 }

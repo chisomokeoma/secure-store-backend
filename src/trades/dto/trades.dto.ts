@@ -1,4 +1,4 @@
-import { IsString } from 'class-validator';
+import { IsString, IsOptional } from 'class-validator';
 
 // Reworked flow: clients do NOT set trade terms here — they just push the
 // selected receipt to the exchange. Pricing is fully exchange-driven and
@@ -6,6 +6,15 @@ import { IsString } from 'class-validator';
 export class CreateTradeDto {
   @IsString()
   receiptId!: string;
+
+  // 2FA fields — see CreateWithdrawalDto for semantics.
+  @IsOptional()
+  @IsString()
+  pin?: string;
+
+  @IsOptional()
+  @IsString()
+  otp?: string;
 }
 
 export class SettleTradeDto {

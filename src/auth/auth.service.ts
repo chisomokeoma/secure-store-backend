@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { EmailService } from '../email/email.service';
+import { resolveDeliveryEmail } from '../email/email.recipient';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'node:crypto';
 
@@ -81,7 +82,13 @@ export class AuthService {
     const email = rawEmail.trim().toLowerCase();
     const user = await this.prisma.user.findUnique({
       where: { email },
-      select: { id: true, email: true, firstName: true, status: true },
+      select: {
+        id: true,
+        email: true,
+        contactEmail: true,
+        firstName: true,
+        status: true,
+      },
     });
 
     if (user && user.status === 'ACTIVE') {
@@ -107,8 +114,11 @@ export class AuthService {
       ]);
 
       const resetUrl = this.buildResetUrl(rawToken);
+      // resolveDeliveryEmail enforces the system-wide convention: real
+      // contact email if on file, system login alias only as a (logged)
+      // fallback. See src/email/email.recipient.ts.
       await this.email.sendPasswordResetEmail({
-        to: user.email,
+        to: resolveDeliveryEmail(user),
         firstName: user.firstName,
         resetUrl,
         expiresInMinutes: RESET_TOKEN_TTL_MINUTES,

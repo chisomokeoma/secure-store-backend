@@ -18,6 +18,7 @@ import { JwtAuthGuard } from '../auth/jwt.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { CurrentUser } from '../common/decorators/user.decorator';
+import { ClientScopeId } from '../common/decorators/client-scope-id.decorator';
 
 @ApiTags('Dashboard')
 @ApiBearerAuth()
@@ -38,28 +39,44 @@ export class DashboardController {
   }
 
   @Get('commodity-breakdown')
-  @ApiOperation({ summary: 'Get stock breakdown by commodity' })
+  @ApiOperation({
+    summary:
+      "Stock breakdown by commodity. Auto-scoped to the caller's own receipts when the active role is CLIENT; tenant-wide when the caller is a privileged role (TENANT_ADMIN / GLOBAL_ADMIN / WAREHOUSE_MANAGER).",
+  })
   @ApiResponse({ status: 200, type: [CommodityBreakdownDto] })
-  getCommodityBreakdown(@CurrentUser('tenantId') tenantId: string) {
-    return this.dashboardService.getCommodityBreakdown(tenantId);
+  getCommodityBreakdown(
+    @CurrentUser('tenantId') tenantId: string,
+    @ClientScopeId() forClientId: string | undefined,
+  ) {
+    return this.dashboardService.getCommodityBreakdown(tenantId, forClientId);
   }
 
   @Get('activity-trend')
-  @ApiOperation({ summary: 'Get deposit/withdrawal trends over time' })
+  @ApiOperation({
+    summary:
+      "Deposit/withdrawal trends over time. Auto-scoped to the caller's own activity when CLIENT; tenant-wide otherwise.",
+  })
   @ApiQuery({ name: 'range', enum: ['7d', '1m', '6m', '1y'], required: false })
   @ApiResponse({ status: 200, type: [ActivityTrendDto] })
   getActivityTrend(
     @CurrentUser('tenantId') tenantId: string,
+    @ClientScopeId() forClientId: string | undefined,
     @Query('range') range: '7d' | '1m' | '6m' | '1y' = '6m',
   ) {
-    return this.dashboardService.getActivityTrend(tenantId, range);
+    return this.dashboardService.getActivityTrend(tenantId, range, forClientId);
   }
 
   @Get('recent-activities')
-  @ApiOperation({ summary: 'Get unified recent activity feed' })
+  @ApiOperation({
+    summary:
+      "Unified recent activity feed. Auto-scoped to the caller's own activity when CLIENT; tenant-wide otherwise.",
+  })
   @ApiResponse({ status: 200, type: [RecentActivityDto] })
-  getRecentActivities(@CurrentUser('tenantId') tenantId: string) {
-    return this.dashboardService.getRecentActivities(tenantId);
+  getRecentActivities(
+    @CurrentUser('tenantId') tenantId: string,
+    @ClientScopeId() forClientId: string | undefined,
+  ) {
+    return this.dashboardService.getRecentActivities(tenantId, forClientId);
   }
 
   // -- Admin-only Drill-down Endpoints --
