@@ -29,7 +29,7 @@ async function main() {
     { name: 'GLOBAL_ADMIN', description: 'Platform-wide administrator' },
     { name: 'TENANT_ADMIN', description: 'Organisation administrator' },
     { name: 'WAREHOUSE_MANAGER', description: 'Manages a single warehouse' },
-    { name: 'FINANCIER', description: 'Loan offering provider' },
+    { name: 'FINANCIER', description: 'Financier org user — receives pledges, holds liens, approves releases' },
     { name: 'CLIENT', description: 'Platform user' },
   ];
   for (const r of roles) {

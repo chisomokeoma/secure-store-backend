@@ -567,6 +567,203 @@ export class InventoryLedgerService {
   }
 
   // -------------------------------------------------------------------------
+  // releasePartial — collateral flow (partial lien release).
+  //
+  // Splits a HELD_LIEN leaf into (a) an ACTIVE child of `releaseQuantity`
+  // that returns to the client's available pool, and (b) a HELD_LIEN
+  // child carrying the still-liened remainder. Source is marked SPLIT.
+  //
+  // Note: existing `partition()` helper hardcodes remainder as ACTIVE, so
+  // for this case we inline the split logic (both children are non-ACTIVE:
+  // the primary is ACTIVE, the remainder must stay HELD_LIEN).
+  //
+  // Callers use this only when line.quantity < lien.remainingQuantity;
+  // full-release is done via the simpler `release()` method above.
+  // -------------------------------------------------------------------------
+  async releasePartial(input: {
+    tenantId: string;
+    heldReceiptId: string;
+    releaseQuantity: Prisma.Decimal.Value;
+    // ReleaseRequest id for the audit trail's txnId.
+    releaseRequestId: string;
+    actorUserId?: string;
+    idempotencyKey: string;
+    metadata?: Prisma.InputJsonValue;
+  }): Promise<{ released: Receipt; remainingHeld: Receipt }> {
+    const releaseQty = D(input.releaseQuantity);
+    return this.runIdempotent(
+      input.idempotencyKey,
+      async (e) => {
+        const kids = await this.byEvent(e);
+        const released = kids.find((k) => k.status === 'ACTIVE');
+        const remainingHeld = kids.find((k) => k.status === 'HELD_LIEN');
+        return {
+          released: released as Receipt,
+          remainingHeld: remainingHeld as Receipt,
+        };
+      },
+      () =>
+        withSerializableTx(this.prisma, async (tx) => {
+          await lockReceiptForUpdate(tx, input.heldReceiptId, input.tenantId);
+          const src = await this.loadOrThrow(
+            tx,
+            input.heldReceiptId,
+            input.tenantId,
+          );
+          if (src.status !== 'HELD_LIEN') {
+            throw new InvalidStateTransitionException(
+              `Cannot partially release from status ${src.status}; expected HELD_LIEN`,
+            );
+          }
+          if (releaseQty.lte(0)) {
+            throw new InsufficientQuantityException(
+              releaseQty.toString(),
+              '0',
+            );
+          }
+          if (releaseQty.gte(src.quantity)) {
+            throw new InsufficientQuantityException(
+              releaseQty.toString(),
+              src.quantity.toString(),
+            );
+          }
+
+          const ev = await this.event(tx, {
+            tenantId: input.tenantId,
+            rootReceiptId: src.rootReceiptId,
+            fromReceiptId: src.id,
+            eventType: 'HOLD_RELEASED',
+            quantity: releaseQty,
+            txnType: 'PLEDGE',
+            txnId: input.releaseRequestId,
+            actorUserId: input.actorUserId,
+            idempotencyKey: input.idempotencyKey,
+            metadata: input.metadata,
+          });
+
+          // Manual two-child split. Primary = ACTIVE (released), remainder
+          // = HELD_LIEN (stays locked). Both inherit provenance from src.
+          const base = baseReceiptNumber(src.receiptNumber);
+          const taken = await existingChildSuffixes(tx, base);
+          const primarySuffix = nextSuffix(taken);
+          const released = await tx.receipt.create({
+            data: {
+              receiptNumber: `${base}-${primarySuffix}`,
+              status: 'ACTIVE',
+              tenantId: src.tenantId,
+              commodityId: src.commodityId,
+              quantity: releaseQty,
+              grade: src.grade,
+              warehouseId: src.warehouseId,
+              clientId: src.clientId,
+              approvalStatus: 'APPROVED',
+              parentReceiptId: src.id,
+              rootReceiptId: src.rootReceiptId,
+              sourceEventId: ev.id,
+              dateOfDeposit: src.dateOfDeposit,
+              expiryDate: src.expiryDate,
+            },
+          });
+          const remSuffix = nextSuffix([...taken, primarySuffix]);
+          const remainingHeld = await tx.receipt.create({
+            data: {
+              receiptNumber: `${base}-${remSuffix}`,
+              status: 'HELD_LIEN',
+              tenantId: src.tenantId,
+              commodityId: src.commodityId,
+              quantity: src.quantity.minus(releaseQty),
+              grade: src.grade,
+              warehouseId: src.warehouseId,
+              clientId: src.clientId,
+              // Match the source's approval — HELD_LIEN inherits APPROVED
+              // (the pledge acceptance approved it).
+              approvalStatus: src.approvalStatus,
+              parentReceiptId: src.id,
+              rootReceiptId: src.rootReceiptId,
+              sourceEventId: ev.id,
+              sourceTxnType: src.sourceTxnType,
+              sourceTxnId: src.sourceTxnId,
+              dateOfDeposit: src.dateOfDeposit,
+              expiryDate: src.expiryDate,
+            },
+          });
+          await tx.receipt.update({
+            where: { id: src.id },
+            data: {
+              status: 'SPLIT',
+              isParent: true,
+              supersededAt: new Date(),
+            },
+          });
+          return { released, remainingHeld };
+        }),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // transitionPledgeToLien — collateral flow.
+  //
+  // When a financier accepts a pledge, the child receipt already held in
+  // HELD_PLEDGE_PENDING flips to HELD_LIEN. Same leaf, same quantity, same
+  // parent — just a status transition. No new child receipts, no split,
+  // no volume change.
+  //
+  // We record it as a distinct InventoryEvent (type=PLEDGE_ACCEPTED) so
+  // the audit trail can distinguish "pending pledge accepted" from a fresh
+  // HOLD_PLACED (which would imply a new hold on new volume). Idempotent
+  // on the caller's idempotency key.
+  // -------------------------------------------------------------------------
+  async transitionPledgeToLien(input: {
+    tenantId: string;
+    heldReceiptId: string;
+    // Pledge id — recorded on the event's txnId so an audit query "which
+    // event flipped this leaf to lien?" resolves back to the pledge row.
+    pledgeId: string;
+    actorUserId?: string;
+    idempotencyKey: string;
+    metadata?: Prisma.InputJsonValue;
+  }): Promise<ReceiptNode> {
+    return this.runIdempotent(
+      input.idempotencyKey,
+      (e) => this.affected(e),
+      () =>
+        withSerializableTx(this.prisma, async (tx) => {
+          await lockReceiptForUpdate(
+            tx,
+            input.heldReceiptId,
+            input.tenantId,
+          );
+          const r = await this.loadOrThrow(
+            tx,
+            input.heldReceiptId,
+            input.tenantId,
+          );
+          if (r.status !== 'HELD_PLEDGE_PENDING') {
+            throw new InvalidStateTransitionException(
+              `Cannot transition to lien from status ${r.status}; expected HELD_PLEDGE_PENDING`,
+            );
+          }
+          await this.event(tx, {
+            tenantId: input.tenantId,
+            rootReceiptId: r.rootReceiptId,
+            fromReceiptId: r.id,
+            eventType: 'PLEDGE_ACCEPTED',
+            quantity: r.quantity,
+            txnType: 'PLEDGE',
+            txnId: input.pledgeId,
+            actorUserId: input.actorUserId,
+            idempotencyKey: input.idempotencyKey,
+            metadata: input.metadata,
+          });
+          return tx.receipt.update({
+            where: { id: r.id },
+            data: { status: 'HELD_LIEN' },
+          });
+        }),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // seize — loan default. FULL = status-only + ownership; PARTIAL = split.
   // -------------------------------------------------------------------------
   async seize(input: {

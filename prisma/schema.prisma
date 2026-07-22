@@ -26,8 +26,17 @@ enum ReceiptStatus {
   ACTIVE // live, transactable leaf
   PENDING_APPROVAL // graded by warehouse manager, awaiting approval
   HELD_WITHDRAWAL // reserved by an in-flight withdrawal
-  HELD_LOAN // pledged as live loan collateral
+  HELD_LOAN // legacy: pledged against a live loan (kept for /loans/*)
   HELD_TRADE // listed on the exchange
+  // Collateral flow: volume moved into a "pending pledge" reservation.
+  // Client cannot withdraw / trade / re-pledge this volume; financier
+  // hasn't decided yet. Transitions to HELD_LIEN on accept or ACTIVE
+  // on reject/expire.
+  HELD_PLEDGE_PENDING
+  // Active lien — financier accepted the pledge. Fully encumbered; only
+  // an approved ReleaseRequest (or a Global Admin force-release) can
+  // free this volume back to ACTIVE.
+  HELD_LIEN
   WITHDRAWN // terminal: physically removed
   TRADED_OUT // terminal: ownership transferred via sale
   SEIZED // terminal: collateral taken on loan default
@@ -48,6 +57,10 @@ enum TxnType {
   LOAN
   TRADE
   ADJUSTMENT
+  // Collateral flow. Distinct from LOAN so InventoryEvent audit trails
+  // for the new /me/pledges → /financier/pledges/:id/accept path don't
+  // get confused with the legacy /loans/* module's HELD_LOAN receipts.
+  PLEDGE
 }
 
 enum InventoryEventType {
@@ -56,6 +69,11 @@ enum InventoryEventType {
   REJECTED
   HOLD_PLACED
   HOLD_RELEASED
+  // Collateral flow: the transition from HELD_PLEDGE_PENDING to HELD_LIEN
+  // when a financier accepts a pledge. No volume change (same leaf), just
+  // a status flip, so a dedicated event type keeps the audit trail
+  // readable without inventing a full split/merge.
+  PLEDGE_ACCEPTED
   CONSUMED
   OWNERSHIP_TRANSFERRED
   SEIZED
@@ -112,6 +130,11 @@ enum TransactionOtpPurpose {
   // proof-of-mailbox-control that stops anyone with session access (e.g.
   // a WM on a shared kiosk) from quietly changing the client's password.
   CHANGE_PASSWORD
+  // Collateral flow: 2FA gates on financier decisions. Accepting a pledge
+  // commits the bank's balance sheet as collateral against a real receipt;
+  // approving a release lifts that commitment. Both require step-up.
+  PLEDGE_ACCEPT
+  RELEASE_APPROVE
 }
 
 enum NotificationType {
@@ -142,6 +165,28 @@ enum NotificationType {
   TRADE_LISTED
   TRADE_SOLD
   TRADE_CANCELLED
+
+  // Collateral (pledges → liens → releases)
+  PLEDGE_CREATED
+  PLEDGE_ACCEPTED
+  PLEDGE_REJECTED
+  PLEDGE_EXPIRED
+  RELEASE_REQUESTED
+  RELEASE_APPROVED
+  RELEASE_REJECTED
+  LIEN_FORCE_RELEASED
+  // Ambient notifications for financiers: activity in a warehouse they've
+  // linked to. `DEPOSIT_LINKED_WAREHOUSE` fires once per deposit into any
+  // warehouse where this financier has an ACTIVE link — for the "position
+  // is moving" feed. `WITHDRAWAL_BLOCKED_BY_LIEN` fires when a client
+  // attempts a withdrawal that would dip into their lien with this financier.
+  DEPOSIT_LINKED_WAREHOUSE
+  WITHDRAWAL_BLOCKED_BY_LIEN
+
+  // Warehouse-link lifecycle (financier ↔ TA approval flow)
+  WAREHOUSE_LINK_REQUESTED
+  WAREHOUSE_LINK_APPROVED
+  WAREHOUSE_LINK_REJECTED
 }
 
 enum BillingFrequency {
@@ -150,6 +195,45 @@ enum BillingFrequency {
   MONTHLY
   QUARTERLY
   ANNUALLY
+}
+
+// ─── Collateral / financier flow enums ────────────────────────────────────
+// Status literals below EXACTLY match src/api/types/collateral.ts on the FE.
+// The FE parses these strings verbatim into discriminated union types; any
+// rename here breaks the FE's status-badge rendering AND the mutation
+// call sites. Do NOT rename without a coordinated FE change.
+
+enum FinancierOrgStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum WarehouseLinkStatus {
+  PENDING     // Financier submitted onboarding; awaiting TA approval
+  ACTIVE      // TA approved; financier can receive pledges from this warehouse
+  OFFBOARDED  // Terminated by either party (only allowed when no active liens)
+}
+
+enum PledgeStatus {
+  PENDING     // Submitted by client; awaiting financier decision
+  ACCEPTED    // Financier accepted; a Lien row now exists
+  REJECTED    // Financier rejected; volume returned to available
+  EXPIRED     // TTL elapsed without decision; volume returned to available
+  CANCELLED   // Client withdrew the request (only allowed while PENDING)
+}
+
+enum LienStatus {
+  ACTIVE              // Fully under lien
+  PARTIALLY_RELEASED  // Some volume released via approved ReleaseRequest(s); remainder still liened
+  RELEASED            // Fully released (all volume returned to available)
+  FORCE_RELEASED      // Global Admin override with court order; terminal
+}
+
+enum ReleaseRequestStatus {
+  PENDING     // Submitted by client; awaiting financier decision
+  APPROVED    // Financier approved; lien decremented, volume freed
+  REJECTED    // Financier rejected; volume stays liened
+  CANCELLED   // Client withdrew (only allowed while PENDING)
 }
 
 enum WarehouseStatus {
@@ -266,6 +350,17 @@ model Tenant {
   clientDirectors      ClientDirector[]
   clientDocuments      ClientDocument[]
   notifications        Notification[]
+  clientAttachments    ClientWarehouseAttachment[]
+  clientLookupAudits   ClientLookupAudit[]
+
+  // Collateral flow — new entities in the Financier / Pledge / Lien model
+  financierOrgs        FinancierOrg[]
+  warehouseLinks       WarehouseLink[]
+  pledges              Pledge[]
+  liens                Lien[]
+  releaseRequests      ReleaseRequest[]
+  forceReleases        ForceRelease[]
+  commodityPrices      CommodityPrice[]
 
   @@map("tenants")
 }
@@ -324,10 +419,40 @@ model User {
   notifications       Notification[]
   transactionOtps     TransactionOtp[]
 
+  // Multi-warehouse attachments. A client (User with a ClientProfile) can be
+  // present in more than one warehouse in the same tenant — attached explicitly
+  // by a WM via the lookup+attach flow, not implicit-via-first-receipt.
+  clientAttachments   ClientWarehouseAttachment[] @relation("ClientAttachments")
+  attachedClients     ClientWarehouseAttachment[] @relation("AttachedByManager")
+  detachedClients     ClientWarehouseAttachment[] @relation("DetachedByManager")
+  clientLookupAudits  ClientLookupAudit[]         @relation("LookupAuditor")
+
+  // ── Collateral flow ────────────────────────────────────────────────────
+  // A user is either a CLIENT (owns receipts, submits pledges/release
+  // requests) OR a financier-role user (belongs to a FinancierOrg, decides
+  // pledges/releases) OR a WM/TA/GA. The FinancierOrg FK is populated only
+  // for financier-role users; every other role has it null.
+  financierOrgId      String?                     @map("financier_org_id")
+  financierOrg        FinancierOrg?               @relation("FinancierOrgUsers", fields: [financierOrgId], references: [id])
+
+  // Reverse relations for the collateral flow — a client has pledges,
+  // liens, and release requests they've submitted; a financier user has
+  // decisions they've recorded; a global admin has force-releases.
+  clientPledges          Pledge[]         @relation("ClientPledges")
+  decidedPledges         Pledge[]         @relation("PledgeDecider")
+  clientLiens            Lien[]           @relation("ClientLiens")
+  clientReleaseRequests  ReleaseRequest[] @relation("ClientReleaseRequests")
+  decidedReleaseRequests ReleaseRequest[] @relation("ReleaseRequestDecider")
+  createdWarehouseLinks  WarehouseLink[]  @relation("WarehouseLinkCreator")
+  decidedWarehouseLinks  WarehouseLink[]  @relation("WarehouseLinkDecider")
+  forceReleases          ForceRelease[]   @relation("ForceReleaseAdmin")
+  commodityPricesSet     CommodityPrice[] @relation("PriceSetter")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([tenantId])
+  @@index([financierOrgId])
   @@map("users")
 }
 
@@ -386,6 +511,10 @@ model Warehouse {
   warehouseCommodities WarehouseCommodity[]
   managerAssignments   WarehouseManagerAssignment[]
   storageFeePolicies   StorageFeePolicy[]
+  clientAttachments    ClientWarehouseAttachment[]
+  clientLookupAudits   ClientLookupAudit[]
+  warehouseLinks       WarehouseLink[]
+  pledges              Pledge[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -414,6 +543,7 @@ model Commodity {
   gradingParameters    GradingParameter[]
   storageFeePolicies   StorageFeePolicy[]
   clientFocus          ClientFocusCommodity[]
+  prices               CommodityPrice[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -549,6 +679,17 @@ model Receipt {
   loans       Loan[]
   trades      Trade[]
 
+  // Collateral flow reverse relations. `pledges` — the pledges that
+  // reference THIS receipt (typically the root receipt visible to the
+  // client). `heldForPledge` — if this is the CHILD receipt holding the
+  // pledged-pending volume (created by InventoryLedger.hold), the pledge
+  // that owns it. `liens` — liens whose receipt is this (post-accept).
+  // `releaseLines` — release-request lines targeting this receipt.
+  pledges          Pledge[]              @relation("PledgeReceipt")
+  heldForPledge    Pledge?               @relation("PledgeHeldReceipt")
+  liens            Lien[]
+  releaseLines     ReleaseRequestLine[]
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -628,6 +769,17 @@ model ClientProfile {
   lga           String?
   nationalId    String? @map("national_id")
 
+  // Nigerian financial-tier identifiers — the two 11-digit numbers issued
+  // by NIMC (NIN) and NIBSS (BVN). Discrete columns (not one polymorphic
+  // idNumber column) so the multi-warehouse lookup at
+  // GET /manager/clients/lookup can index-scan both cheaply. Uniqueness
+  // within a tenant is enforced at the application layer during
+  // client create + update — Prisma doesn't support @@unique on nullable
+  // pairs cleanly, and we specifically want to allow multiple clients
+  // with NULL identifiers (many clients simply won't have both).
+  nin           String? @map("nin")
+  bvn           String? @map("bvn")
+
   // ── Organization-only fields (NULL when mode = INDIVIDUAL) ──────────────
   rcNumber             String?          @map("rc_number")
   companyName          String?          @map("company_name")
@@ -682,6 +834,10 @@ model ClientProfile {
 
   @@index([tenantId])
   @@index([registeredByManagerId])
+  // Lookup indexes for the "attach existing client" flow. Composite with
+  // tenantId to keep the multi-tenant scan bounded.
+  @@index([tenantId, nin])
+  @@index([tenantId, bvn])
   @@map("client_profiles")
 }
 
@@ -1029,5 +1185,477 @@ model Notification {
   @@index([tenantId])
   @@index([userId, type, createdAt(sort: Desc)])
   @@map("notifications")
+}
+
+/// Explicit "this client is present at this warehouse" record. Prior to this
+/// model, WM ↔ client visibility was implicit-via-receipts: the client only
+/// appeared in a WM's list once they had a receipt in that WM's warehouse.
+/// That worked for single-warehouse clients but blocked two workflows:
+///   1. Onboarding a client into a warehouse BEFORE their first deposit
+///      (WM wants to stage docs / bank info / focus commodities ahead of time)
+///   2. Adding an existing client (already registered at another warehouse)
+///      to a new warehouse via NIN/BVN lookup — the flow this model was
+///      created for. See ManagersService.lookupClientByIdentifier +
+///      AttachClientToWarehouse.
+///
+/// Detach semantics: `detachedAt` is nullable. Active attachment = null.
+/// We never hard-delete rows so the audit trail (who attached, who detached,
+/// when, why) survives forever. A soft-detach means the WM's list stops
+/// showing the client, but their historical receipts at this warehouse
+/// remain queryable (receipts are the source of truth for what happened;
+/// attachments are the source of truth for what's currently in scope).
+model ClientWarehouseAttachment {
+  id           String    @id @default(uuid())
+  tenantId     String    @map("tenant_id")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id])
+
+  // The client user. FK to User (via ClientProfile.userId).
+  clientId     String    @map("client_id")
+  client       User      @relation("ClientAttachments", fields: [clientId], references: [id])
+
+  warehouseId  String    @map("warehouse_id")
+  warehouse    Warehouse @relation(fields: [warehouseId], references: [id])
+
+  // The WM who performed the attach — for audit + "attached by" surfacing
+  // on the client's warehouse-detail view.
+  attachedById String    @map("attached_by_id")
+  attachedBy   User      @relation("AttachedByManager", fields: [attachedById], references: [id])
+  attachedAt   DateTime  @default(now()) @map("attached_at")
+
+  // Soft-detach. When populated, the client no longer appears in this
+  // warehouse's client list, but the row survives for audit.
+  detachedById String?   @map("detached_by_id")
+  detachedBy   User?     @relation("DetachedByManager", fields: [detachedById], references: [id])
+  detachedAt   DateTime? @map("detached_at")
+
+  // Optional free-text note the WM can add at attach time (e.g. "moved
+  // from Lagos to Ibadan branch") or at detach time (e.g. "client
+  // relocated, no longer using this warehouse").
+  reason       String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // NOTE: the "only one ACTIVE attachment per (client, warehouse)" invariant
+  // is enforced at the application layer in ManagersService.attachClient,
+  // not via a partial unique index. Prisma doesn't natively support partial
+  // indices in schema.prisma; adding one would require a raw SQL migration
+  // and would complicate the re-attach-after-detach flow (which is common:
+  // client moves out, moves back six months later — same (client, warehouse)
+  // pair, new active row).
+  @@index([clientId, warehouseId, detachedAt])
+  @@index([warehouseId, tenantId, detachedAt])
+  @@index([tenantId])
+  @@map("client_warehouse_attachments")
+}
+
+/// Audit trail for the NIN/BVN lookup endpoint. Written on EVERY lookup —
+/// hit or miss, in-scope or out-of-scope — so we have forensic evidence
+/// if a WM starts using the endpoint to enumerate identifiers.
+///
+/// Storage: identifier is HASHED (sha256) never raw. This gives us the
+/// audit ability ("was this NIN looked up 40 times last week?") without
+/// concentrating PII in the audit log itself. If a specific NIN needs to
+/// be traced, the tenant admin can hash it and query.
+model ClientLookupAudit {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+
+  // The WM who performed the lookup.
+  managerId      String   @map("manager_id")
+  manager        User     @relation("LookupAuditor", fields: [managerId], references: [id])
+
+  // The warehouse the WM was signed into at lookup time (for cross-referencing
+  // "which warehouse's staff is enumerating identifiers"). Nullable because
+  // some future flow might allow lookup without an active warehouse session.
+  warehouseId    String?   @map("warehouse_id")
+  warehouse      Warehouse? @relation(fields: [warehouseId], references: [id])
+
+  identifierType String   @map("identifier_type") // 'NIN' | 'BVN'
+  identifierHash String   @map("identifier_hash") // sha256 of the identifier
+
+  // What happened: FOUND_IN_SCOPE (already visible), FOUND_ELSEWHERE
+  // (exists in tenant, not yet attached), NOT_FOUND (no match at all).
+  result         String
+
+  // The client that matched, if any. Nullable when NOT_FOUND.
+  matchedClientId String? @map("matched_client_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([managerId, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([identifierHash])
+  @@map("client_lookup_audits")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COLLATERAL FLOW — Financier / Pledge / Lien / Release
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The collateral flow lets a client pledge (part of) a receipt to a
+// financier (bank / FI) as collateral for an off-system loan. Volume
+// accounting is tracked by the UTXO-style receipt tree already used by
+// withdrawals and legacy loans — a pledge holds a child receipt in the
+// HELD_PLEDGE_PENDING state; acceptance transitions to HELD_LIEN;
+// release/expire returns to ACTIVE.
+//
+// Contract: FE types at src/api/types/collateral.ts. Every enum literal
+// and field name below matches the FE's parser exactly — coordinate
+// renames.
+//
+// Rationale for keeping the legacy Financier + Loan models untouched:
+// the collateral flow is semantically different (no loan math, no
+// interest/tenure) but the /loans/* endpoints stay live for the
+// existing product surface. We add FinancierOrg alongside; migrating
+// loans to the new model is a v2 concern.
+
+/// The bank / financial institution that receives pledges and holds liens.
+/// One FinancierOrg has many financier-role users (see User.financierOrgId).
+/// Provisioned by Tenant Admin via a new "Add financier org" screen.
+model FinancierOrg {
+  id            String @id @default(uuid())
+  tenantId      String @map("tenant_id")
+  tenant        Tenant @relation(fields: [tenantId], references: [id])
+
+  name          String
+  licenseNumber String? @map("license_number")
+  // Signed license certificate / master agreement uploaded at create time
+  // (via POST /storage/upload?kind=LICENSE_DOC). Optional — a TA can add
+  // it later via the same modal in edit mode. Storing here so the TA's
+  // Financiers table can render a "view license" affordance without an
+  // extra join.
+  licenseDocUrl String? @map("license_doc_url")
+  logoUrl       String? @map("logo_url")
+
+  status        FinancierOrgStatus @default(ACTIVE)
+
+  // Per-org override of the pledge TTL. Null = fall back to the system
+  // default (env var PLEDGE_TTL_DAYS, currently 7). When a client submits
+  // a pledge, the server reads this field on the target FinancierOrg
+  // and computes expiresAt = createdAt + (this ?? default) days.
+  pledgeTtlDays Int? @map("pledge_ttl_days")
+
+  users            User[]           @relation("FinancierOrgUsers")
+  warehouseLinks   WarehouseLink[]
+  pledges          Pledge[]
+  liens            Lien[]
+  releaseRequests  ReleaseRequest[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([status])
+  @@map("financier_orgs")
+}
+
+/// A signed agreement between a FinancierOrg and a Warehouse allowing
+/// clients of that warehouse to pledge receipts to that financier.
+/// Financier-initiated onboarding (uploads agreement doc) → PENDING;
+/// Tenant Admin reviews and moves to ACTIVE (or hard-deletes on reject —
+/// no REJECTED status in v1 per Q3). Offboarding is blocked while any
+/// active lien exists in that warehouse.
+model WarehouseLink {
+  id             String       @id @default(uuid())
+  tenantId       String       @map("tenant_id")
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+
+  financierOrgId String       @map("financier_org_id")
+  financierOrg   FinancierOrg @relation(fields: [financierOrgId], references: [id])
+
+  warehouseId    String       @map("warehouse_id")
+  warehouse      Warehouse    @relation(fields: [warehouseId], references: [id])
+
+  status         WarehouseLinkStatus @default(PENDING)
+
+  agreementDocUrl String?  @map("agreement_doc_url")
+  signedAt        DateTime? @map("signed_at")
+
+  // Who submitted the onboarding request (financier-role user).
+  createdById   String @map("created_by_id")
+  createdBy     User   @relation("WarehouseLinkCreator", fields: [createdById], references: [id])
+
+  // Who approved / offboarded (Tenant Admin for approval; either party
+  // can offboard as long as no active liens exist).
+  decidedById    String?   @map("decided_by_id")
+  decidedBy      User?     @relation("WarehouseLinkDecider", fields: [decidedById], references: [id])
+  decidedAt      DateTime? @map("decided_at")
+  decisionReason String?   @map("decision_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Only one ACTIVE-track link per (financier, warehouse) pair. Enforced
+  // application-side because Prisma doesn't cleanly support partial
+  // unique indexes; we check "no non-OFFBOARDED row exists" before
+  // creating a new PENDING.
+  @@index([financierOrgId, warehouseId, status])
+  @@index([warehouseId, status])
+  @@index([tenantId, status])
+  @@map("warehouse_links")
+}
+
+/// Client's request to pledge (part of) a receipt as collateral. The
+/// pledged volume is held out of `available` immediately (into a child
+/// receipt with HELD_PLEDGE_PENDING) and either transitions to a Lien
+/// on accept or returns to ACTIVE on reject/expire/cancel.
+///
+/// `receiptId` points to the ROOT receipt (what the client sees in their
+/// list). `heldReceiptId` points to the CHILD receipt that carries the
+/// held-pending volume — used by the ledger to release/transition. This
+/// split lets the FE render "pledge on RCP-0042" without exposing the
+/// tree-child implementation detail.
+model Pledge {
+  id             String       @id @default(uuid())
+  tenantId       String       @map("tenant_id")
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+
+  // Root receipt — the client-visible one.
+  receiptId      String       @map("receipt_id")
+  receipt        Receipt      @relation("PledgeReceipt", fields: [receiptId], references: [id])
+
+  // Held child receipt (leaf carrying the pledged volume). Populated at
+  // creation. On accept, this leaf transitions HELD_PLEDGE_PENDING →
+  // HELD_LIEN and becomes the Lien's receipt too.
+  heldReceiptId  String?      @unique @map("held_receipt_id")
+  heldReceipt    Receipt?     @relation("PledgeHeldReceipt", fields: [heldReceiptId], references: [id])
+
+  clientId       String       @map("client_id")
+  client         User         @relation("ClientPledges", fields: [clientId], references: [id])
+
+  financierOrgId String       @map("financier_org_id")
+  financierOrg   FinancierOrg @relation(fields: [financierOrgId], references: [id])
+
+  warehouseId    String       @map("warehouse_id")
+  warehouse      Warehouse    @relation(fields: [warehouseId], references: [id])
+
+  // Volume + unit snapshot at pledge time. Unit is snapshotted so a later
+  // commodity unit change (e.g. rename MT → METRIC_TON) doesn't retro-
+  // active the pledge's display.
+  quantity Decimal @db.Decimal(20, 4)
+  unit     String
+
+  // Reference-only display value; NOT used for any lending / eligibility
+  // math per §8 non-goals. Populated per Q2 answer via the automatic
+  // CommodityPrice lookup at pledge time (with fallback to null if no
+  // price is available for this commodity).
+  valuationAtPledge Decimal? @db.Decimal(20, 2) @map("valuation_at_pledge")
+  currency          String   @default("NGN")
+
+  status         PledgeStatus @default(PENDING)
+  clientNote     String?      @map("client_note")
+
+  decisionReason String?      @map("decision_reason")
+  decidedById    String?      @map("decided_by_id")
+  decidedBy      User?        @relation("PledgeDecider", fields: [decidedById], references: [id])
+  decidedAt      DateTime?    @map("decided_at")
+
+  // Computed at creation: createdAt + (financierOrg.pledgeTtlDays ??
+  // env PLEDGE_TTL_DAYS ?? 7) days. Cron scans for status=PENDING and
+  // expiresAt <= now(), transitions to EXPIRED and releases volume.
+  expiresAt DateTime @map("expires_at")
+
+  // Backlink to the resulting lien (populated on accept).
+  lien Lien?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@index([clientId, status])
+  @@index([financierOrgId, status])
+  @@index([status, expiresAt])
+  @@map("pledges")
+}
+
+/// An active claim by a FinancierOrg on a specific volume of a receipt.
+/// Created atomically when a Pledge is accepted. Decrements on approved
+/// ReleaseRequests. Terminal states: RELEASED (fully returned), or
+/// FORCE_RELEASED (Global Admin override with court order).
+///
+/// `receiptId` here is the CHILD leaf holding the liened volume (unlike
+/// Pledge.receiptId which is the root). The two are equal at creation
+/// (accepted pledge's heldReceipt IS the lien's receipt), but partial
+/// releases can further subdivide.
+model Lien {
+  id             String       @id @default(uuid())
+  tenantId       String       @map("tenant_id")
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+
+  pledgeId       String       @unique @map("pledge_id")
+  pledge         Pledge       @relation(fields: [pledgeId], references: [id])
+
+  receiptId      String       @map("receipt_id")
+  receipt        Receipt      @relation(fields: [receiptId], references: [id])
+
+  clientId       String       @map("client_id")
+  client         User         @relation("ClientLiens", fields: [clientId], references: [id])
+
+  financierOrgId String       @map("financier_org_id")
+  financierOrg   FinancierOrg @relation(fields: [financierOrgId], references: [id])
+
+  // `quantity` — the original locked amount (never mutates; audit-safe).
+  // `remainingQuantity` — the still-liened amount; decrements on each
+  // approved release. When 0, status transitions to RELEASED.
+  quantity          Decimal @db.Decimal(20, 4)
+  remainingQuantity Decimal @db.Decimal(20, 4) @map("remaining_quantity")
+
+  status     LienStatus @default(ACTIVE)
+  placedAt   DateTime   @default(now()) @map("placed_at")
+  releasedAt DateTime?  @map("released_at")
+
+  releaseLines ReleaseRequestLine[]
+  forceRelease ForceRelease?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@index([clientId, status])
+  @@index([financierOrgId, status])
+  @@index([receiptId])
+  @@map("liens")
+}
+
+/// Client's request to release (part of) one or more liens. Multi-line —
+/// a single request can target several liens from the same financier
+/// (all lines must share `financierId`). Approval is all-or-nothing per
+/// request in v1 (§1.3): financier approves everything or rejects the
+/// whole thing (client re-submits corrected).
+model ReleaseRequest {
+  id             String       @id @default(uuid())
+  tenantId       String       @map("tenant_id")
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+
+  clientId       String       @map("client_id")
+  client         User         @relation("ClientReleaseRequests", fields: [clientId], references: [id])
+
+  financierOrgId String       @map("financier_org_id")
+  financierOrg   FinancierOrg @relation(fields: [financierOrgId], references: [id])
+
+  // Client's requested release date. Informational — actual release
+  // happens whenever the financier approves. Not a hard deadline.
+  requestedDate DateTime @map("requested_date")
+  note          String?
+
+  status         ReleaseRequestStatus @default(PENDING)
+  decisionReason String?              @map("decision_reason")
+  decidedById    String?              @map("decided_by_id")
+  decidedBy      User?                @relation("ReleaseRequestDecider", fields: [decidedById], references: [id])
+  decidedAt      DateTime?            @map("decided_at")
+
+  lines ReleaseRequestLine[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@index([clientId, status])
+  @@index([financierOrgId, status])
+  @@map("release_requests")
+}
+
+/// One line item within a ReleaseRequest — targets a specific lien with
+/// a specific quantity. `receiptId` denormalised for FE query efficiency
+/// (avoids join through Lien for the release-request listing).
+model ReleaseRequestLine {
+  id String @id @default(uuid())
+
+  releaseRequestId String         @map("release_request_id")
+  releaseRequest   ReleaseRequest @relation(fields: [releaseRequestId], references: [id], onDelete: Cascade)
+
+  lienId    String  @map("lien_id")
+  lien      Lien    @relation(fields: [lienId], references: [id])
+
+  receiptId String  @map("receipt_id")
+  receipt   Receipt @relation(fields: [receiptId], references: [id])
+
+  quantity  Decimal @db.Decimal(20, 4)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([releaseRequestId])
+  @@index([lienId])
+  @@map("release_request_lines")
+}
+
+/// Immutable Global-Admin override that terminates a lien outside the
+/// normal accept/release flow — only permitted with a court order.
+/// Required fields: reason (free-text) + courtOrderDocUrl (via /storage/
+/// upload?kind=COURT_ORDER). No updated_at — this row is append-only.
+model ForceRelease {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  lienId String @unique @map("lien_id")
+  lien   Lien   @relation(fields: [lienId], references: [id])
+
+  adminId String @map("admin_id")
+  admin   User   @relation("ForceReleaseAdmin", fields: [adminId], references: [id])
+
+  reason           String
+  courtOrderDocUrl String @map("court_order_doc_url")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@index([adminId])
+  @@map("force_releases")
+}
+
+/// Latest reference price per commodity per tenant, used to fill
+/// Pledge.valuationAtPledge automatically at pledge creation time
+/// (per Q2 answer: automatic per current market data).
+///
+/// v1 impl: manual admin-updated rows. Tenant Admin sets prices in an
+/// admin screen; each pledge picks up the latest row for its commodity.
+///
+/// v2+ (planned): a scheduled sync job pulls prices from an external
+/// feed (NCX, Trading Economics, etc.) and inserts rows with source ≠
+/// "MANUAL". The pledge-time lookup logic doesn't need to know about
+/// the sync — it just reads the latest effective row.
+///
+/// Multiple rows per commodity are expected (historical prices survive)
+/// so we ORDER BY effectiveAt DESC + LIMIT 1 to pick the current one.
+model CommodityPrice {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  commodityId String    @map("commodity_id")
+  commodity   Commodity @relation(fields: [commodityId], references: [id])
+
+  // The unit this price is denominated per. Should match the commodity's
+  // unitOfMeasure but stored as a string for future flexibility (e.g. a
+  // per-bag price on a commodity denominated in KG).
+  unit String
+
+  pricePerUnit Decimal @db.Decimal(20, 2) @map("price_per_unit")
+  currency     String  @default("NGN")
+
+  // Who set the price and when it takes effect. `effectiveAt` allows
+  // scheduling future price changes (insert now, effective tomorrow —
+  // the lookup won't pick it up until tomorrow).
+  setById     String   @map("set_by_id")
+  setBy       User     @relation("PriceSetter", fields: [setById], references: [id])
+  effectiveAt DateTime @map("effective_at")
+
+  // Provenance tag for later cross-referencing (audit, "which feed
+  // gave us this price"). Free text for v1 flexibility — later can
+  // become an enum once the sync mechanism is picked.
+  source String @default("MANUAL")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // The lookup query is:
+  //   ORDER BY effectiveAt DESC LIMIT 1
+  //   WHERE tenantId = ? AND commodityId = ? AND effectiveAt <= now()
+  // This composite index makes that a single index scan.
+  @@index([tenantId, commodityId, effectiveAt(sort: Desc)])
+  @@map("commodity_prices")
 }
 

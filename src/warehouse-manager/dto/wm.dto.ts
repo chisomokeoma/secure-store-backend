@@ -10,6 +10,7 @@ import {
   IsArray,
   ArrayUnique,
   IsIn,
+  Matches,
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
@@ -165,6 +166,21 @@ export class CreateClientDto {
   @IsOptional() @IsString() nationalId?: string;
   @IsOptional() @IsString() residentialAddress?: string;
 
+  // Nigerian financial-tier identifiers — both are exactly 11 digits.
+  // Optional at DTO level so the create form can save a draft without
+  // KYC; the service layer enforces uniqueness within the tenant when
+  // either is provided. Regex validates format at the boundary so we
+  // don't persist garbage; a malformed value 400s before hitting the DB.
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{11}$/, { message: 'NIN must be exactly 11 digits' })
+  nin?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{11}$/, { message: 'BVN must be exactly 11 digits' })
+  bvn?: string;
+
   // Multi-focus commodities. Replaces the legacy single `focusCommodityId`.
   // Passing `[]` is valid and means "no focus commodities".
   @IsOptional()
@@ -241,6 +257,19 @@ export class UpdateClientDto {
   @IsOptional() @IsString() lga?: string;
   @IsOptional() @IsString() nationalId?: string;
   @IsOptional() @IsString() residentialAddress?: string;
+
+  // Same NIN / BVN validation as CreateClientDto — 11-digit format
+  // enforced at the boundary. Uniqueness within tenant is enforced at
+  // the service layer whenever either field changes.
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{11}$/, { message: 'NIN must be exactly 11 digits' })
+  nin?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{11}$/, { message: 'BVN must be exactly 11 digits' })
+  bvn?: string;
 
   // File URLs — both must come from POST /storage/upload. The WM-side
   // edit form lets the warehouse manager replace the client's profile

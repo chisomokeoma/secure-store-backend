@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -109,13 +110,112 @@ export class WarehouseManagerController {
     return this.service.getClientStats(tenantId, userId);
   }
 
+  @Get('clients/lookup')
+  @ApiOperation({
+    summary:
+      'Look up an EXISTING client in this tenant by NIN / BVN / national ID / generic ID number. Used by the "add existing client to another warehouse" flow — a WM types the identifier, we return a slim identity envelope so the FE can render a preview card before the WM commits to attaching.',
+    description:
+      'Uniform-shape response regardless of hit/miss/out-of-scope + a 200ms wall-clock floor + audit-log write + 10-per-minute rate limit. All four are anti-probing hardening — without them, an operator could enumerate NIN/BVN existence via timing or error-shape differences. `warehouseId` (optional) is the warehouse the WM is currently signed into; when provided, it\'s excluded from the `presentInOtherWarehouses` count so the number reads correctly from the WM\'s perspective.',
+  })
+  @ApiQuery({
+    name: 'identifier',
+    required: true,
+    description: 'The NIN / BVN / national ID value to search for',
+  })
+  @ApiQuery({
+    name: 'warehouseId',
+    required: false,
+    description:
+      "The warehouse the WM is currently working in. Excluded from `presentInOtherWarehouses` so the count reads as 'other warehouses'.",
+  })
+  lookupClientByIdentifier(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Query('identifier') identifier: string,
+    @Query('warehouseId') warehouseId?: string,
+  ) {
+    return this.service.lookupClientByIdentifier(
+      tenantId,
+      userId,
+      identifier,
+      warehouseId ?? null,
+    );
+  }
+
+  @Post('warehouses/:warehouseId/clients/attach')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary:
+      'Attach an EXISTING tenant client to this warehouse. Called after GET /manager/clients/lookup returns `canAttach: true` and the WM confirms the preview.',
+    description:
+      'Creates a ClientWarehouseAttachment row that makes the client immediately visible in this warehouse\'s client list — no receipt needed. Returns 409 { code: "CLIENT_ALREADY_ATTACHED", attachmentId } if an active attachment already exists (the FE should treat this as success and navigate to the client detail).',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['clientId'],
+      properties: {
+        clientId: {
+          type: 'string',
+          description: 'User id of the client (from lookup.identity.id)',
+        },
+        reason: {
+          type: 'string',
+          description:
+            'Optional free-text note (e.g. "moved from Lagos to Ibadan branch")',
+        },
+      },
+    },
+  })
+  attachClientToWarehouse(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Param('warehouseId') warehouseId: string,
+    @Body('clientId') clientId: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.service.attachClientToWarehouse(
+      tenantId,
+      userId,
+      warehouseId,
+      clientId,
+      reason,
+    );
+  }
+
+  @Delete('warehouses/:warehouseId/clients/:clientId/attach')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Detach a client from this warehouse (soft — the row survives for audit). The client's historical receipts remain queryable, they just stop appearing in this warehouse's client list.",
+  })
+  detachClientFromWarehouse(
+    @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
+    @Param('warehouseId') warehouseId: string,
+    @Param('clientId') clientId: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.service.detachClientFromWarehouse(
+      tenantId,
+      userId,
+      warehouseId,
+      clientId,
+      reason,
+    );
+  }
+
   @Get('clients/:id')
-  @ApiOperation({ summary: 'Client detail + receipt stats' })
+  @ApiOperation({
+    summary:
+      'Client detail + receipt stats. SCOPED to this WM: returns 404 if the caller has no visibility (no receipts in their warehouses, not the registrar, no active attachment). Previously this returned any client in the tenant by id — that leak is now closed.',
+  })
   getClient(
     @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
     @Param('id') id: string,
   ) {
-    return this.service.getClient(tenantId, id);
+    return this.service.getClient(tenantId, id, userId);
   }
 
   @Get('clients/:id/receipts')
@@ -169,13 +269,17 @@ export class WarehouseManagerController {
   }
 
   @Patch('clients/:id')
-  @ApiOperation({ summary: 'Update a client profile' })
+  @ApiOperation({
+    summary:
+      'Update a client profile. SCOPED to this WM — 404 if the client is not in the caller\'s visibility (same rules as GET /manager/clients/:id).',
+  })
   updateClient(
     @CurrentUser('tenantId') tenantId: string,
+    @CurrentUser('id') userId: string,
     @Param('id') id: string,
     @Body() dto: UpdateClientDto,
   ) {
-    return this.service.updateClient(tenantId, id, dto);
+    return this.service.updateClient(tenantId, id, dto, userId);
   }
 
   @Get('commodities/:id/grading-parameters')

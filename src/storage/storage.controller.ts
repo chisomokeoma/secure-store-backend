@@ -22,15 +22,19 @@ import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { CurrentUser } from '../common/decorators/user.decorator';
 import { StorageService } from './storage.service';
-import { StorageKind, StorageNotFoundError } from './storage.types';
+import {
+  StorageKind,
+  StorageNotFoundError,
+  STORAGE_KIND_CONFIG,
+} from './storage.types';
 
-const VALID_KINDS: readonly StorageKind[] = [
-  'PROFILE_PHOTO',
-  'ID_DOCUMENT',
-  'CLIENT_DOCUMENT',
-  'WAREHOUSE_PHOTO',
-  'OTHER',
-];
+// Derived from the single source of truth (STORAGE_KIND_CONFIG) so
+// adding a new kind is one edit in storage.types.ts, not two. Previously
+// this was hardcoded and drifted — LICENSE_DOC/AGREEMENT_DOC/COURT_ORDER
+// were in the config but rejected by this controller.
+const VALID_KINDS: readonly StorageKind[] = Object.keys(
+  STORAGE_KIND_CONFIG,
+) as StorageKind[];
 
 /**
  * Two endpoints:
@@ -66,7 +70,7 @@ export class StorageController {
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({
     summary:
-      "Upload a file. multipart/form-data, single field `file`. Pass `?kind=` to pick per-kind size/mime limits (PROFILE_PHOTO, ID_DOCUMENT, CLIENT_DOCUMENT, WAREHOUSE_PHOTO, OTHER). Pass `?subjectUserId=` if the file is attached to a different user's record (e.g. WM uploading a client's KYC doc). Returns { key, url, size, contentType, originalName, storedAt } — persist the `url` on the relevant entity.",
+      "Upload a file. multipart/form-data, single field `file`. Pass `?kind=` to pick per-kind size/mime limits (PROFILE_PHOTO, ID_DOCUMENT, CLIENT_DOCUMENT, WAREHOUSE_PHOTO, LICENSE_DOC, AGREEMENT_DOC, COURT_ORDER, OTHER). Pass `?subjectUserId=` if the file is attached to a different user's record (e.g. WM uploading a client's KYC doc). Returns { key, url, size, contentType, originalName, storedAt } — persist the `url` on the relevant entity.",
   })
   @ApiQuery({ name: 'kind', enum: VALID_KINDS as unknown as string[] })
   @ApiQuery({ name: 'subjectUserId', required: false })

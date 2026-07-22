@@ -328,6 +328,19 @@ export class WithdrawalsService {
     // because the hold is deferred to confirm-payment). The receipt must
     // be a live, admin-approved leaf at creation time.
     if (sourceReceipt.status !== 'ACTIVE') {
+      // Special-case HELD_LIEN — surface the financier awareness signal
+      // per spec §6 (`withdrawal.blocked_by_lien`). The client wouldn't
+      // normally reach here (the FE only offers ACTIVE leaves for
+      // withdrawal), so this catches API misuse or a race with a
+      // just-accepted pledge. Best-effort notification — a failure here
+      // must not swallow the 409 to the client.
+      if (sourceReceipt.status === 'HELD_LIEN') {
+        void this.notifyLienHoldersOfBlockedWithdrawal(
+          tenantId,
+          sourceReceipt.id,
+          clientId,
+        ).catch(() => undefined);
+      }
       throw new ConflictException(
         `Receipt is not in an active state (status=${sourceReceipt.status}).`,
       );
@@ -495,6 +508,50 @@ export class WithdrawalsService {
    * as abandoned. This is a soft reservation, not a ledger hold; it only
    * affects what the create endpoint will accept.
    */
+  /**
+   * Fire the `WITHDRAWAL_BLOCKED_BY_LIEN` awareness notification to all
+   * users of the financier org holding the lien on this receipt. Best-
+   * effort — a notifications failure must not swallow the 409 the client
+   * is already getting.
+   */
+  private async notifyLienHoldersOfBlockedWithdrawal(
+    tenantId: string,
+    receiptId: string,
+    clientId: string,
+  ) {
+    const lien = await this.prisma.lien.findFirst({
+      where: {
+        receiptId,
+        status: { in: ['ACTIVE', 'PARTIALLY_RELEASED'] },
+      },
+      include: {
+        financierOrg: { select: { id: true, name: true } },
+        receipt: { select: { receiptNumber: true } },
+        client: { select: { firstName: true, lastName: true } },
+      },
+    });
+    if (!lien) return; // No matching lien — nothing to notify about.
+
+    const financierUsers = await this.prisma.user.findMany({
+      where: { financierOrgId: lien.financierOrgId, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    await Promise.all(
+      financierUsers.map((u) =>
+        this.notifications
+          .notifyUser(u.id, {
+            tenantId,
+            type: 'WITHDRAWAL_BLOCKED_BY_LIEN',
+            title: 'Blocked withdrawal on liened stock',
+            body: `${lien.client.firstName} ${lien.client.lastName} attempted to withdraw against receipt ${lien.receipt.receiptNumber} which is under lien to your organisation.`,
+            relatedEntityType: 'lien',
+            relatedEntityId: lien.id,
+          })
+          .catch(() => undefined),
+      ),
+    );
+  }
+
   private async availableForWithdrawal(
     tenantId: string,
     receiptId: string,
