@@ -4,6 +4,14 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
+import { FinancierOrgsModule } from './financier-orgs/financier-orgs.module';
+import { FinancierModule } from './financier/financier.module';
+import { WarehouseLinksModule } from './warehouse-links/warehouse-links.module';
+import { CommodityPricesModule } from './commodity-prices/commodity-prices.module';
+import { PledgesModule } from './pledges/pledges.module';
+import { LiensModule } from './liens/liens.module';
+import { ReleaseRequestsModule } from './release-requests/release-requests.module';
+import { AdminLiensModule } from './admin-liens/admin-liens.module';
 import { UsersModule } from './users/users.module';
 import { WarehousesModule } from './warehouses/warehouses.module';
 import { CommoditiesModule } from './commodities/commodities.module';
@@ -85,6 +93,14 @@ import { StorageModule } from './storage/storage.module';
     EmailModule,
     SecurityModule,
     StorageModule,
+    FinancierOrgsModule,
+    FinancierModule,
+    WarehouseLinksModule,
+    CommodityPricesModule,
+    PledgesModule,
+    LiensModule,
+    ReleaseRequestsModule,
+    AdminLiensModule,
   ],
   controllers: [AppController],
   providers: [AppService],

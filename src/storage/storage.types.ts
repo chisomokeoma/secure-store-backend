@@ -69,6 +69,13 @@ export type StorageKind =
   | 'ID_DOCUMENT'
   | 'CLIENT_DOCUMENT'
   | 'WAREHOUSE_PHOTO'
+  // Collateral-flow document kinds (financier / warehouse-link / admin
+  // force-release). Same auth-gated read path as any other storage
+  // object; the FE's DocumentViewerModal fetches through axios with
+  // the bearer token attached.
+  | 'LICENSE_DOC'
+  | 'AGREEMENT_DOC'
+  | 'COURT_ORDER'
   | 'OTHER';
 
 /** Per-kind upload constraints — single source of truth. */
@@ -111,6 +118,42 @@ export const STORAGE_KIND_CONFIG: Record<StorageKind, StorageKindConfig> = {
     maxBytes: 8 * 1024 * 1024,
     allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
     pathPrefix: 'warehouse-photos',
+  },
+  LICENSE_DOC: {
+    // Financier's license certificate / master agreement scan. PDFs are
+    // the norm; image scans allowed as fallback.
+    maxBytes: 15 * 1024 * 1024, // 15 MB
+    allowedMimeTypes: [
+      'application/pdf',
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+    ],
+    pathPrefix: 'license-docs',
+  },
+  AGREEMENT_DOC: {
+    // Signed warehouse-onboarding agreement between a FinancierOrg and
+    // a Warehouse. Attached to WarehouseLink.agreementDocUrl.
+    maxBytes: 15 * 1024 * 1024,
+    allowedMimeTypes: [
+      'application/pdf',
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+    ],
+    pathPrefix: 'agreement-docs',
+  },
+  COURT_ORDER: {
+    // Court order backing a Global Admin force-release. Attached to
+    // ForceRelease.courtOrderDocUrl — immutable once persisted.
+    maxBytes: 25 * 1024 * 1024, // Court PDFs run longer
+    allowedMimeTypes: [
+      'application/pdf',
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+    ],
+    pathPrefix: 'court-orders',
   },
   OTHER: {
     maxBytes: 10 * 1024 * 1024,

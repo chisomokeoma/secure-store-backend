@@ -250,7 +250,17 @@ export class SecurityService {
     // actions (password rotation, future email/phone change, …) — the OTP
     // is the proof-of-mailbox-control that stops a session-thief or a WM
     // on a shared kiosk from quietly mutating the account.
-    const ALWAYS_REQUIRE_OTP: TransactionOtpPurpose[] = ['CHANGE_PASSWORD'];
+    // PLEDGE_ACCEPT + RELEASE_APPROVE are financier-side step-up gates on
+    // collateral commitments (§5 of the financier spec). We always send
+    // the OTP for these, regardless of the financier user's own 2FA
+    // toggle — accepting a pledge commits their bank's balance sheet
+    // against real inventory, and that's too load-bearing to be
+    // shortcut-able by turning off 2FA in Settings.
+    const ALWAYS_REQUIRE_OTP: TransactionOtpPurpose[] = [
+      'CHANGE_PASSWORD',
+      'PLEDGE_ACCEPT',
+      'RELEASE_APPROVE',
+    ];
 
     // For all OTHER purposes, 2FA-off means no OTP makes sense:
     //   - WITHDRAWAL/LOAN/TRADE: transaction gate is skipped at submit time

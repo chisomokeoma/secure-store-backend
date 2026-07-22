@@ -48,7 +48,9 @@ export class InvalidStateTransitionException extends ConflictException {
 export type HeldStatus =
   | 'HELD_WITHDRAWAL'
   | 'HELD_LOAN'
-  | 'HELD_TRADE';
+  | 'HELD_TRADE'
+  | 'HELD_PLEDGE_PENDING'
+  | 'HELD_LIEN';
 
 export type ReceiptNode = Receipt;
 
@@ -69,6 +71,8 @@ const HELD: ReceiptStatus[] = [
   'HELD_WITHDRAWAL',
   'HELD_LOAN',
   'HELD_TRADE',
+  'HELD_PLEDGE_PENDING',
+  'HELD_LIEN',
 ];
 
 const CLOSED: ReceiptStatus[] = [

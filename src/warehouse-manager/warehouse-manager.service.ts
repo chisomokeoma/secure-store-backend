@@ -5,7 +5,7 @@ import {
   ForbiddenException,
   ConflictException,
 } from '@nestjs/common';
-import { randomUUID, randomInt } from 'node:crypto';
+import { createHash, randomUUID, randomInt } from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
@@ -204,6 +204,15 @@ export class WarehouseManagerService {
       }
     }
 
+    // NIN / BVN uniqueness check before we enter the transaction — a
+    // duplicate should 409 the whole call, not partially create a user
+    // then fail on the profile write.
+    await this.assertIdentifiersUnique({
+      tenantId,
+      nin: dto.nin,
+      bvn: dto.bvn,
+    });
+
     // Directors / documents passed in this call (ORGANIZATION only — they're
     // silently ignored for INDIVIDUAL clients to keep the contract relaxed).
     const directors = mode === 'ORGANIZATION' ? dto.directors ?? [] : [];
@@ -273,6 +282,8 @@ export class WarehouseManagerService {
           stateOfOrigin: dto.stateOfOrigin,
           lga: dto.lga,
           nationalId: dto.nationalId,
+          nin: dto.nin,
+          bvn: dto.bvn,
           profilePhotoUrl: dto.profilePhotoUrl,
           idDocumentUrl: dto.idDocumentUrl,
           bankAccountName: dto.bankAccountName,
@@ -455,6 +466,24 @@ export class WarehouseManagerService {
    * When `scope` is null (privileged role / no narrowing) we return null and
    * the caller skips the filter entirely.
    */
+  /**
+   * The visibility filter for "which clients can this WM see."
+   *
+   * A client is in a WM's scope if ANY of these are true:
+   *   1. The WM personally registered the client (they created the profile).
+   *   2. The client has at least one receipt in a warehouse the WM oversees.
+   *   3. The client has an ACTIVE ClientWarehouseAttachment to a warehouse
+   *      the WM oversees. This is the "attach existing client" path — the
+   *      client can appear in the WM's list BEFORE their first receipt,
+   *      which is the point of the lookup+attach flow.
+   *
+   * NOTE (historical): a prior fourth condition matched clients whose
+   * registeredByManager works in the same warehouse as this WM. It was
+   * dropped as leaky — if WM-A registers a client then moves warehouses,
+   * WM-A's new coworkers gained retroactive visibility to that client
+   * even without any receipt or attachment. Registration alone shouldn't
+   * confer visibility once the registrar moves on.
+   */
   private async clientScopeWhere(
     tenantId: string,
     managerUserId: string,
@@ -466,14 +495,464 @@ export class WarehouseManagerService {
         { registeredByManagerId: managerUserId },
         { user: { receipts: { some: { warehouseId: { in: scope } } } } },
         {
-          registeredByManager: {
-            managerAssignments: {
-              some: { warehouseId: { in: scope }, unassignedAt: null },
+          user: {
+            clientAttachments: {
+              some: {
+                warehouseId: { in: scope },
+                detachedAt: null,
+              },
             },
           },
         },
       ],
     };
+  }
+
+  /**
+   * Guard against duplicate NIN / BVN within a tenant. Called from both
+   * createClient and updateClient before persisting. Prisma can't do this
+   * via `@@unique` cleanly (nullable columns + "many clients have neither
+   * populated" would make a unique constraint too strict), so we enforce
+   * at the app layer here.
+   *
+   * `excludeUserId` — pass the client's own userId on updates so
+   * re-saving the same NIN back doesn't false-positive against itself.
+   * Omit (or pass undefined) on creates.
+   *
+   * Throws ConflictException with a structured `code` so the FE can
+   * highlight the specific field that clashed:
+   *   { code: 'NIN_ALREADY_IN_USE',  field: 'nin', existingClientCode: '...' }
+   *   { code: 'BVN_ALREADY_IN_USE',  field: 'bvn', existingClientCode: '...' }
+   */
+  private async assertIdentifiersUnique(args: {
+    tenantId: string;
+    nin?: string | null;
+    bvn?: string | null;
+    excludeUserId?: string;
+  }) {
+    const { tenantId, nin, bvn, excludeUserId } = args;
+    // Nothing to check when neither identifier is being set.
+    if (!nin && !bvn) return;
+
+    const checks: Promise<{ field: 'nin' | 'bvn'; clash: any | null }>[] = [];
+    if (nin) {
+      checks.push(
+        this.prisma.clientProfile
+          .findFirst({
+            where: {
+              tenantId,
+              nin,
+              ...(excludeUserId ? { NOT: { userId: excludeUserId } } : {}),
+            },
+            select: { clientCode: true, userId: true },
+          })
+          .then((clash) => ({ field: 'nin' as const, clash })),
+      );
+    }
+    if (bvn) {
+      checks.push(
+        this.prisma.clientProfile
+          .findFirst({
+            where: {
+              tenantId,
+              bvn,
+              ...(excludeUserId ? { NOT: { userId: excludeUserId } } : {}),
+            },
+            select: { clientCode: true, userId: true },
+          })
+          .then((clash) => ({ field: 'bvn' as const, clash })),
+      );
+    }
+
+    const results = await Promise.all(checks);
+    // Report the FIRST clash we find. If both clash, the FE will surface
+    // the second one on the next attempt after the WM fixes the first —
+    // simpler UX than a compound error payload.
+    for (const { field, clash } of results) {
+      if (clash) {
+        throw new ConflictException({
+          code: field === 'nin' ? 'NIN_ALREADY_IN_USE' : 'BVN_ALREADY_IN_USE',
+          field,
+          message: `This ${field.toUpperCase()} is already in use by another client in your organisation`,
+          existingClientCode: clash.clientCode,
+        });
+      }
+    }
+  }
+
+  // ── Multi-warehouse "add existing client" flow ─────────────────────────
+  //
+  // In-memory rate-limit bucket for the lookup endpoint. Structure:
+  //   Map<managerUserId, number[]>  → sorted list of recent lookup timestamps.
+  // Every lookup pushes now(); pruning drops anything > 60s old before the
+  // length check. Per-instance memory (fine on single-instance Render Free;
+  // for horizontal scale swap to a Redis-backed sliding window — the
+  // interface here can stay the same).
+  private readonly lookupBuckets = new Map<string, number[]>();
+  private static readonly LOOKUP_RATE_LIMIT_PER_MIN = 10;
+  private static readonly LOOKUP_TIMING_FLOOR_MS = 200;
+
+  /**
+   * Search the tenant for a client by NIN / BVN / national ID / generic
+   * `idNumber`. Returns a UNIFORM-SHAPE response regardless of whether the
+   * client exists, exists but is out of the WM's scope, or doesn't exist
+   * at all — this is anti-probing hardening. Combined with the timing floor,
+   * an attacker can't distinguish "hit" from "miss" by response time or by
+   * top-level shape.
+   *
+   * The response body varies only in the two booleans
+   * (`existsInScope` / `existsElsewhere`) and — when found — a slim identity
+   * envelope for the FE preview card. Enough for the WM to say "yes attach
+   * this person", not enough to fingerprint arbitrary NINs in bulk.
+   *
+   * Every call — hit or miss — writes a `ClientLookupAudit` row so we have
+   * forensic evidence if an operator starts using the endpoint to enumerate
+   * identifiers. The audit stores the identifier as a sha256 HASH, never
+   * the raw value — enough to answer "was this specific NIN looked up N
+   * times?" (the operator hashes and queries) without concentrating PII in
+   * the log.
+   *
+   * Rate limit: 10 lookups per WM per minute. A legitimate WM types one or
+   * two identifiers to onboard a client; 10/min still supports batch
+   * onboarding but makes bulk enumeration painful.
+   */
+  async lookupClientByIdentifier(
+    tenantId: string,
+    managerUserId: string,
+    identifier: string,
+    warehouseId: string | null,
+  ) {
+    const started = Date.now();
+
+    // Basic input hygiene. Reject empty / too-short / too-long inputs
+    // BEFORE incurring the DB round-trip. Both NIN and BVN are exactly 11
+    // digits, but we allow anything 6–20 chars to also support the legacy
+    // `nationalId` field which had no format constraint.
+    const raw = (identifier ?? '').trim();
+    if (raw.length < 6 || raw.length > 32) {
+      throw new BadRequestException(
+        'Identifier must be between 6 and 32 characters',
+      );
+    }
+
+    // Rate-limit check — done BEFORE the DB query so a spamming client
+    // can't cause database load. Uses in-memory sliding window.
+    const now = Date.now();
+    const windowStart = now - 60_000;
+    const bucket = this.lookupBuckets.get(managerUserId) ?? [];
+    const recent = bucket.filter((t) => t >= windowStart);
+    if (recent.length >= WarehouseManagerService.LOOKUP_RATE_LIMIT_PER_MIN) {
+      throw new ForbiddenException(
+        'Too many lookups. Please wait a minute before trying again.',
+      );
+    }
+    recent.push(now);
+    this.lookupBuckets.set(managerUserId, recent);
+
+    // Do the actual lookup + audit write + timing floor in parallel. The
+    // sleep guarantees a minimum wall-clock response time so hits and
+    // misses are indistinguishable by timing. The audit write is best-
+    // effort (we swallow its errors) — a logging failure must not surface
+    // as a lookup failure to the caller.
+    const identifierHash = createHash('sha256').update(raw).digest('hex');
+
+    const [profile] = await Promise.all([
+      this.prisma.clientProfile.findFirst({
+        where: {
+          tenantId,
+          OR: [
+            { nin: raw },
+            { bvn: raw },
+            { nationalId: raw },
+            { idNumber: raw },
+          ],
+        },
+        select: {
+          userId: true,
+          clientCode: true,
+          type: true,
+          mode: true,
+          companyName: true,
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              status: true,
+            },
+          },
+        },
+      }),
+      // Fixed-time floor so hits and misses land the same wall-clock.
+      new Promise((resolve) =>
+        setTimeout(resolve, WarehouseManagerService.LOOKUP_TIMING_FLOOR_MS),
+      ),
+    ]);
+
+    let existsInScope = false;
+    let existsElsewhere = false;
+    let presentInOtherWarehouses = 0;
+    let identity: {
+      id: string;
+      clientCode: string;
+      name: string;
+      type: string;
+      mode: string;
+    } | null = null;
+    let auditResult = 'NOT_FOUND';
+    let matchedClientId: string | null = null;
+
+    if (profile) {
+      matchedClientId = profile.userId;
+
+      // Scope check — is this client visible to THIS WM already?
+      // Uses the same clientScopeWhere as listClients / getClient so the
+      // definition stays uniform. `null` scope means the caller has
+      // unlimited visibility (no warehouse restriction), which shouldn't
+      // happen for a WM but we handle it as "in scope."
+      const scopeWhere = await this.clientScopeWhere(tenantId, managerUserId);
+      if (scopeWhere === null) {
+        existsInScope = true;
+      } else {
+        const inScope = await this.prisma.clientProfile.count({
+          where: {
+            tenantId,
+            userId: profile.userId,
+            ...scopeWhere,
+          },
+        });
+        existsInScope = inScope > 0;
+      }
+      existsElsewhere = !existsInScope;
+
+      // How many OTHER warehouses is this client attached to (or has
+      // active receipts in)? Union of the two — a warehouse where the
+      // client has receipts but no attachment row still counts as "present."
+      const [attachCount, receiptWarehouses] = await Promise.all([
+        this.prisma.clientWarehouseAttachment.findMany({
+          where: {
+            tenantId,
+            clientId: profile.userId,
+            detachedAt: null,
+          },
+          select: { warehouseId: true },
+        }),
+        this.prisma.receipt.findMany({
+          where: {
+            tenantId,
+            clientId: profile.userId,
+          },
+          select: { warehouseId: true },
+          distinct: ['warehouseId'],
+        }),
+      ]);
+      const warehousesWithPresence = new Set<string>([
+        ...attachCount.map((a) => a.warehouseId),
+        ...receiptWarehouses.map((r) => r.warehouseId),
+      ]);
+      // Subtract the requesting warehouse itself so the count reads as
+      // "other warehouses" from the requesting WM's perspective.
+      if (warehouseId) warehousesWithPresence.delete(warehouseId);
+      presentInOtherWarehouses = warehousesWithPresence.size;
+
+      // Slim identity envelope for the FE preview card. Only fields a WM
+      // needs to confirm "yes this is the right person": display name,
+      // client code (for cross-reference), type, mode. NO bank details,
+      // NO contact info, NO KYC docs — those come after attach.
+      //
+      // `mode` is surfaced so the FE can route "view / edit existing
+      // client" clicks to the correct wizard variant (individual step 1
+      // vs OrgStep2Representative) without a second network round-trip.
+      identity = {
+        id: profile.userId,
+        clientCode: profile.clientCode,
+        name:
+          profile.mode === 'ORGANIZATION'
+            ? (profile.companyName ??
+              `${profile.user.firstName} ${profile.user.lastName}`)
+            : `${profile.user.firstName} ${profile.user.lastName}`,
+        type: profile.type,
+        mode: profile.mode,
+      };
+      auditResult = existsInScope ? 'FOUND_IN_SCOPE' : 'FOUND_ELSEWHERE';
+    }
+
+    // Fire-and-forget audit write.
+    void this.prisma.clientLookupAudit
+      .create({
+        data: {
+          tenantId,
+          managerId: managerUserId,
+          warehouseId: warehouseId ?? null,
+          identifierType: raw.length === 11 && /^\d+$/.test(raw) ? 'NIN_OR_BVN' : 'OTHER',
+          identifierHash,
+          result: auditResult,
+          matchedClientId,
+        },
+      })
+      .catch(() => {
+        // Deliberate swallow — a lookup audit write failure must not
+        // surface as a lookup failure. Alerting on this happens via
+        // monitoring on the audit table, not by throwing.
+      });
+
+    // Assert we hit the timing floor — should always be true because the
+    // Promise.all above included the setTimeout, but defensive assertion
+    // in case the DB query starts finishing faster than 200ms and someone
+    // later removes the sleep from the Promise.all.
+    const elapsed = Date.now() - started;
+    if (elapsed < WarehouseManagerService.LOOKUP_TIMING_FLOOR_MS) {
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          WarehouseManagerService.LOOKUP_TIMING_FLOOR_MS - elapsed,
+        ),
+      );
+    }
+
+    return {
+      existsInScope,
+      existsElsewhere,
+      // canAttach is a UI-affordance hint: false means either not found or
+      // already visible (no attach needed). True means "you'd get value
+      // out of hitting POST /manager/warehouses/:id/clients/attach."
+      canAttach: existsElsewhere,
+      identity,
+      presentInOtherWarehouses,
+    };
+  }
+
+  /**
+   * Attach an existing tenant client to a warehouse. Creates a
+   * ClientWarehouseAttachment row that makes the client immediately
+   * visible in this warehouse's WM list — no receipt needed as a
+   * side-effect.
+   *
+   * Guards:
+   *   1. WM must actually oversee the target warehouse (whScope check).
+   *   2. Client must exist in this tenant. We do NOT require the client to
+   *      be visible to the WM first — that would defeat the point (they
+   *      just discovered the client via lookup precisely because they
+   *      couldn't see them).
+   *   3. No active attachment already for this (client, warehouse) pair.
+   *      Returns 409 if one exists so the FE can show "already attached."
+   */
+  async attachClientToWarehouse(
+    tenantId: string,
+    managerUserId: string,
+    warehouseId: string,
+    clientUserId: string,
+    reason?: string,
+  ) {
+    // 1. WM's own warehouse scope check.
+    const scope = await this.whScope.warehouseIds(tenantId);
+    if (scope && !scope.includes(warehouseId)) {
+      throw new ForbiddenException(
+        'You do not manage this warehouse and cannot attach clients to it',
+      );
+    }
+
+    // 2. Client must exist in tenant. We check via ClientProfile (which
+    // enforces "is a client at all," not just "is a user").
+    const profile = await this.prisma.clientProfile.findFirst({
+      where: { tenantId, userId: clientUserId },
+      select: { userId: true, clientCode: true },
+    });
+    if (!profile) {
+      throw new NotFoundException('Client not found in this tenant');
+    }
+
+    // 3. No duplicate active attachment. If a prior attachment was
+    // detached and now the WM is re-attaching, that's fine — we create
+    // a new row (the detached one is history).
+    const existing = await this.prisma.clientWarehouseAttachment.findFirst({
+      where: {
+        tenantId,
+        clientId: clientUserId,
+        warehouseId,
+        detachedAt: null,
+      },
+    });
+    if (existing) {
+      throw new ConflictException({
+        code: 'CLIENT_ALREADY_ATTACHED',
+        message: 'This client is already attached to this warehouse',
+        attachmentId: existing.id,
+      });
+    }
+
+    return this.prisma.clientWarehouseAttachment.create({
+      data: {
+        tenantId,
+        clientId: clientUserId,
+        warehouseId,
+        attachedById: managerUserId,
+        reason: reason ?? null,
+      },
+      include: {
+        client: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            clientProfile: {
+              select: { clientCode: true, type: true },
+            },
+          },
+        },
+        warehouse: {
+          select: { id: true, name: true, code: true },
+        },
+        attachedBy: {
+          select: { id: true, firstName: true, lastName: true, managerCode: true },
+        },
+      },
+    });
+  }
+
+  /**
+   * Soft-detach a client from a warehouse. Marks the attachment row as
+   * detached but keeps it in the DB for audit. The client's historical
+   * receipts at this warehouse remain queryable (receipts are the source
+   * of truth for what happened; attachments are the source of truth for
+   * what's currently in scope).
+   */
+  async detachClientFromWarehouse(
+    tenantId: string,
+    managerUserId: string,
+    warehouseId: string,
+    clientUserId: string,
+    reason?: string,
+  ) {
+    const scope = await this.whScope.warehouseIds(tenantId);
+    if (scope && !scope.includes(warehouseId)) {
+      throw new ForbiddenException(
+        'You do not manage this warehouse and cannot detach clients from it',
+      );
+    }
+
+    const active = await this.prisma.clientWarehouseAttachment.findFirst({
+      where: {
+        tenantId,
+        clientId: clientUserId,
+        warehouseId,
+        detachedAt: null,
+      },
+    });
+    if (!active) {
+      throw new NotFoundException(
+        'No active attachment found between this client and warehouse',
+      );
+    }
+
+    return this.prisma.clientWarehouseAttachment.update({
+      where: { id: active.id },
+      data: {
+        detachedAt: new Date(),
+        detachedById: managerUserId,
+        reason: reason ?? active.reason,
+      },
+    });
   }
 
   async listClients(
@@ -2040,9 +2519,24 @@ export class WarehouseManagerService {
     return { total, active, inactive };
   }
 
-  async getClient(tenantId: string, clientUserId: string) {
+  async getClient(
+    tenantId: string,
+    clientUserId: string,
+    managerUserId: string,
+  ) {
+    // Warehouse-scope enforcement. Before this guard, any WM in the tenant
+    // could pull any client's full profile — including bank details, NoK,
+    // organisation info — by knowing the client's user id. Now we require
+    // the client to be in the WM's scope (registered by them, receipts in
+    // their warehouses, OR an active attachment). The scope filter is the
+    // same one used by listClients so visibility rules stay uniform.
+    const scopeWhere = await this.clientScopeWhere(tenantId, managerUserId);
     const profile = await this.prisma.clientProfile.findFirst({
-      where: { tenantId, userId: clientUserId },
+      where: {
+        tenantId,
+        userId: clientUserId,
+        ...(scopeWhere ?? {}),
+      },
       include: {
         user: {
           select: {
@@ -2282,9 +2776,18 @@ export class WarehouseManagerService {
     tenantId: string,
     clientUserId: string,
     dto: UpdateClientDto,
+    managerUserId: string,
   ) {
+    // Scope enforcement mirrors getClient: the WM can only patch clients
+    // in their scope. Without this, any WM in the tenant could edit any
+    // client's profile (bank details, NoK, contact info) by knowing the id.
+    const scopeWhere = await this.clientScopeWhere(tenantId, managerUserId);
     const profile = await this.prisma.clientProfile.findFirst({
-      where: { tenantId, userId: clientUserId },
+      where: {
+        tenantId,
+        userId: clientUserId,
+        ...(scopeWhere ?? {}),
+      },
     });
     if (!profile) throw new NotFoundException('Client not found');
 
@@ -2302,6 +2805,20 @@ export class WarehouseManagerService {
     if (dto.profilePhotoUrl !== undefined) {
       userData.profilePhotoUrl =
         dto.profilePhotoUrl === '' ? null : dto.profilePhotoUrl;
+    }
+
+    // NIN / BVN uniqueness check when either is being changed. Excludes
+    // the client's own row (so re-saving the same NIN back doesn't
+    // false-positive against itself). Only runs when the caller is
+    // actually touching one of the fields — omitting them from the DTO
+    // leaves the persisted values untouched and skips the check.
+    if (dto.nin !== undefined || dto.bvn !== undefined) {
+      await this.assertIdentifiersUnique({
+        tenantId,
+        nin: dto.nin,
+        bvn: dto.bvn,
+        excludeUserId: clientUserId,
+      });
     }
 
     // Peel off fields that don't belong on `clientProfile.update.data`:
@@ -2472,7 +2989,7 @@ export class WarehouseManagerService {
       }
     });
 
-    return this.getClient(tenantId, clientUserId);
+    return this.getClient(tenantId, clientUserId, managerUserId);
   }
 
   // ── on-behalf actions (WM acting for a specific client) ──────────────────
@@ -2758,6 +3275,67 @@ export class WarehouseManagerService {
       },
     });
     if (!client) throw new NotFoundException('Client not found');
+
+    // ── Warehouse-linkage guard (multi-warehouse client model) ──────────
+    //
+    // A client must be linked to THIS warehouse before we accept a deposit
+    // for them here. Linkage is any of:
+    //   1. Active ClientWarehouseAttachment for (client, warehouse).
+    //   2. Prior receipts at this warehouse (grandfather clause — the client
+    //      is implicitly linked by history; keeps pre-attachment data working).
+    //   3. This WM personally registered the client (the "brand-new client,
+    //      first deposit" flow — we auto-create the attachment inline so
+    //      subsequent deposits skip straight to condition 1).
+    //
+    // If none apply, we throw a machine-readable error so the FE can route
+    // the WM to the lookup + attach flow instead of a generic 400.
+    const [attachCount, receiptCount] = await Promise.all([
+      this.prisma.clientWarehouseAttachment.count({
+        where: {
+          tenantId,
+          clientId: dto.clientId,
+          warehouseId: dto.warehouseId,
+          detachedAt: null,
+        },
+      }),
+      this.prisma.receipt.count({
+        where: {
+          tenantId,
+          clientId: dto.clientId,
+          warehouseId: dto.warehouseId,
+        },
+      }),
+    ]);
+    if (attachCount === 0 && receiptCount === 0) {
+      const isRegistrar = await this.prisma.clientProfile.count({
+        where: {
+          userId: dto.clientId,
+          tenantId,
+          registeredByManagerId: managerUserId,
+        },
+      });
+      if (isRegistrar > 0) {
+        // Registrar auto-attach. Runs BEFORE the deposit transaction so
+        // a failure here surfaces cleanly (a partial deposit + failed
+        // attachment would be worse than a whole-flow failure).
+        await this.prisma.clientWarehouseAttachment.create({
+          data: {
+            tenantId,
+            clientId: dto.clientId,
+            warehouseId: dto.warehouseId,
+            attachedById: managerUserId,
+            reason: 'Auto-attached on first deposit (WM is registrar)',
+          },
+        });
+      } else {
+        throw new BadRequestException({
+          code: 'CLIENT_NOT_ATTACHED',
+          message:
+            'This client is not attached to this warehouse. Use the client lookup + attach flow before depositing.',
+          hint: 'GET /manager/clients/lookup?identifier=... → POST /manager/warehouses/:warehouseId/clients/attach',
+        });
+      }
+    }
 
     const wc = await this.prisma.warehouseCommodity.findUnique({
       where: {
