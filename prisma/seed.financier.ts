@@ -98,16 +98,16 @@ async function main() {
     );
   }
 
-  // 3. FinancierOrg — idempotent via (tenantId, name) unique
+  // 3. FinancierOrg — platform-level entity (no tenantId since 2026-07-22).
+  //    Idempotent via global name uniqueness.
   let org = await prisma.financierOrg.findFirst({
-    where: { tenantId: tenant.id, name: FINANCIER_NAME },
+    where: { name: FINANCIER_NAME },
   });
   if (org) {
     console.log('  FinancierOrg exists:', org.name, `(${org.id})`);
   } else {
     org = await prisma.financierOrg.create({
       data: {
-        tenantId: tenant.id,
         name: FINANCIER_NAME,
         licenseNumber: FINANCIER_LICENSE,
         status: 'ACTIVE',

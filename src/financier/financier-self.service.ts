@@ -64,7 +64,6 @@ export class FinancierSelfService {
             logoUrl: true,
             status: true,
             pledgeTtlDays: true,
-            tenantId: true,
           },
         },
       },
@@ -243,6 +242,12 @@ export class FinancierSelfService {
           remainingQuantity: true,
           receipt: {
             select: {
+              // tenantId on the receipt is how we scope the CommodityPrice
+              // lookup — financiers are platform-level and cross-tenant, so
+              // the same commodity in a different tenant could be priced
+              // differently. Pull it from the receipt (source of truth for
+              // which tenant this collateral lives under).
+              tenantId: true,
               commodityId: true,
               warehouseId: true,
               commodity: { select: { name: true, unitOfMeasure: true } },
@@ -259,20 +264,27 @@ export class FinancierSelfService {
       this.buildRecentActivity(org.id),
     ]);
 
-    // ── Batched valuation lookup: one CommodityPrice query per unique
-    // commodityId in the lien set, then O(1) map lookups. Matches the
-    // LiensService pattern for consistency.
-    const uniqueCommodityIds = [
-      ...new Set(activeLiens.map((l) => l.receipt.commodityId)),
+    // ── Batched valuation lookup ────────────────────────────────────────
+    // Financier is cross-tenant, so we key the price map by (tenantId,
+    // commodityId) — the same commodity in tenant A vs tenant B may be
+    // priced differently. Map key is a composite string; lookups later
+    // reconstruct the same key from each lien's receipt.
+    const uniqueTenantCommodityPairs = [
+      ...new Set(
+        activeLiens.map(
+          (l) => `${l.receipt.tenantId}::${l.receipt.commodityId}`,
+        ),
+      ),
     ];
     const priceMap = new Map<
       string,
       { pricePerUnit: Prisma.Decimal; currency: string }
     >();
-    for (const cid of uniqueCommodityIds) {
-      const p = await this.commodityPrices.currentPrice(org.tenantId, cid);
+    for (const pair of uniqueTenantCommodityPairs) {
+      const [tenantId, commodityId] = pair.split('::');
+      const p = await this.commodityPrices.currentPrice(tenantId, commodityId);
       if (p) {
-        priceMap.set(cid, {
+        priceMap.set(pair, {
           pricePerUnit: p.pricePerUnit,
           currency: p.currency,
         });
@@ -289,9 +301,13 @@ export class FinancierSelfService {
         value: Prisma.Decimal;
       }
     >();
+    // Helper: reconstruct the (tenantId, commodityId) key used in priceMap.
+    const priceKey = (lien: typeof activeLiens[number]) =>
+      `${lien.receipt.tenantId}::${lien.receipt.commodityId}`;
+
     for (const lien of activeLiens) {
       const cid = lien.receipt.commodityId;
-      const price = priceMap.get(cid);
+      const price = priceMap.get(priceKey(lien));
       const lineValue = price
         ? price.pricePerUnit.mul(lien.remainingQuantity)
         : new Prisma.Decimal(0);
@@ -313,7 +329,7 @@ export class FinancierSelfService {
     >();
     for (const lien of activeLiens) {
       const wid = lien.receipt.warehouseId;
-      const price = priceMap.get(lien.receipt.commodityId);
+      const price = priceMap.get(priceKey(lien));
       const lineValue = price
         ? price.pricePerUnit.mul(lien.remainingQuantity)
         : new Prisma.Decimal(0);

@@ -33,21 +33,73 @@ export class FinancierOrgFirstUserDto {
  * Payload for POST /admin/financiers — creates the org + first user
  * atomically. Matches the FE's CreateFinancierOrgPayload shape verbatim.
  * `licenseNumber` is required (FE marks it as `string`, not `string?`).
+ *
+ * "Basic KYC" block (contactEmail through website) is optional per PO
+ * decision — financiers are heavily regulated externally, so our own
+ * KYC is light. The GA form only enforces `name` + `licenseNumber` +
+ * `firstUser`; the rest fills in over time via edit.
  */
 export class CreateFinancierOrgDto {
   @IsString() @MinLength(2) @MaxLength(120) name!: string;
-  @IsString() @MinLength(1) @MaxLength(64) licenseNumber!: string;
+  // Optional per FE's BASIC-KYC-UPDATE (2026-07-23): regulated
+  // institutions are verified off-platform, so we no longer require the
+  // GA to enter a license number at onboarding. May be filled in later
+  // via PATCH /admin/financiers/:id.
+  @IsOptional() @IsString() @MaxLength(64) licenseNumber?: string;
   @IsOptional() @IsString() logoUrl?: string;
 
   // Optional URL of the signed license certificate / master agreement PDF
-  // — uploaded via POST /storage/upload?kind=LICENSE_DOC on the FE's Add
-  // Financier drawer. Persists on FinancierOrg so the TA table can offer
+  // — uploaded via POST /storage/upload?kind=LICENSE_DOC on the GA's Add
+  // Financier drawer. Persists on FinancierOrg so the admin table can offer
   // a "view license" affordance later.
   @IsOptional() @IsString() licenseDocUrl?: string;
+
+  // Basic-KYC block (all optional). Field names match FE
+  // CreateFinancierOrgPayload verbatim (contactEmail / phoneNumber /
+  // address) — no camel/snake remapping in the service layer.
+  @IsOptional() @IsEmail() contactEmail?: string;
+  @IsOptional() @IsString() @MaxLength(32) phoneNumber?: string;
+  @IsOptional() @IsString() @MaxLength(500) address?: string;
+
+  // Extra fields NOT in the current FE form but retained in the schema
+  // for future admin surfaces (regulator directory, TIN report, external
+  // linkouts). Optional; ignored by today's FE.
+  @IsOptional() @IsString() @MaxLength(32) tin?: string;
+  @IsOptional() @IsString() @MaxLength(64) regulator?: string;
+  @IsOptional() @IsString() @MaxLength(200) website?: string;
 
   @ValidateNested()
   @Type(() => FinancierOrgFirstUserDto)
   firstUser!: FinancierOrgFirstUserDto;
+}
+
+/**
+ * Payload for PATCH /admin/financiers/:id — edit the org's basic-KYC
+ * profile. All fields optional; only the ones present are updated. Name
+ * is editable (rebrand support) but must remain globally unique.
+ * Reactivation, suspension, and offboarding go through their dedicated
+ * verb endpoints, not this patch.
+ */
+export class UpdateFinancierOrgDto {
+  @IsOptional() @IsString() @MinLength(2) @MaxLength(120) name?: string;
+  @IsOptional() @IsString() @MaxLength(64) licenseNumber?: string;
+  @IsOptional() @IsString() logoUrl?: string;
+  @IsOptional() @IsString() licenseDocUrl?: string;
+  @IsOptional() @IsEmail() contactEmail?: string;
+  @IsOptional() @IsString() @MaxLength(32) phoneNumber?: string;
+  @IsOptional() @IsString() @MaxLength(500) address?: string;
+  @IsOptional() @IsString() @MaxLength(32) tin?: string;
+  @IsOptional() @IsString() @MaxLength(64) regulator?: string;
+  @IsOptional() @IsString() @MaxLength(200) website?: string;
+}
+
+/**
+ * Payload for POST /admin/financiers/:id/offboard. Reason is mandatory
+ * so the audit trail carries the *why* of the terminal action. The
+ * endpoint refuses to proceed if any active liens exist (see service).
+ */
+export class OffboardFinancierOrgDto {
+  @IsString() @MinLength(1) @MaxLength(500) reason!: string;
 }
 
 /**

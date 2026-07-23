@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { CommodityPricesModule } from '../commodity-prices/commodity-prices.module';
 import { WarehouseLinksService } from './warehouse-links.service';
 import { FinancierWarehousesController } from './financier-warehouses.controller';
 import { AdminWarehouseLinksController } from './admin-warehouse-links.controller';
@@ -15,7 +16,7 @@ import { AdminWarehouseLinksController } from './admin-warehouse-links.controlle
  * without duplicating the query.
  */
 @Module({
-  imports: [PrismaModule, NotificationsModule],
+  imports: [PrismaModule, NotificationsModule, CommodityPricesModule],
   controllers: [
     FinancierWarehousesController,
     AdminWarehouseLinksController,

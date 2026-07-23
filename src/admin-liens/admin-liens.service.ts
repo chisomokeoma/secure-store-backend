@@ -100,6 +100,28 @@ export class AdminLiensService {
       });
     });
 
+    // Platform-wide activity emit — force-release is a CRITICAL event
+    // (court-order-backed override of a bank's collateral). The reason
+    // and court-order URL survive on the ForceRelease row for the audit
+    // detail view; the ActivityLog carries the human-readable summary.
+    void this.prisma.activityLog
+      .create({
+        data: {
+          tenantId,
+          userId: adminUserId,
+          action: 'lien.force_released',
+          entityType: 'LIEN',
+          entityId: lien.id,
+          description: `Lien on receipt ${lien.receipt.receiptNumber} (${lien.financierOrg.name}) was force-released`,
+          metadata: {
+            severity: 'CRITICAL',
+            reason: dto.reason,
+            courtOrderDocUrl: dto.courtOrderDocUrl,
+          } as Prisma.InputJsonValue,
+        },
+      })
+      .catch(() => undefined);
+
     // Notify both parties.
     void this.notifyBoth(tenantId, lien, dto);
 

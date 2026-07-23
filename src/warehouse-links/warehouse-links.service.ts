@@ -7,7 +7,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { WarehouseLinkStatus } from '@prisma/client';
+import { CommodityPricesService } from '../commodity-prices/commodity-prices.service';
+import { LienStatus, Prisma, WarehouseLinkStatus } from '@prisma/client';
 
 /**
  * Warehouse-onboarding lifecycle (Q3 = TA-approved).
@@ -42,6 +43,7 @@ export class WarehouseLinksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly commodityPrices: CommodityPricesService,
   ) {}
 
   /**
@@ -61,7 +63,6 @@ export class WarehouseLinksService {
             status: true,
             licenseNumber: true,
             logoUrl: true,
-            tenantId: true,
           },
         },
       },
@@ -168,12 +169,142 @@ export class WarehouseLinksService {
       this.prisma.warehouseLink.count({ where }),
     ]);
 
+    // Enrich each row with live position numbers so the FE table's
+    // Clients / Total Stock Value / Liened-to-you columns populate
+    // properly. Computed per-warehouse:
+    //   • clientCount     — distinct clients holding in-warehouse receipts
+    //   • totalStockValue — sum of (qty × currentPrice) for all in-warehouse
+    //                       receipts, ANY financier (this is the warehouse
+    //                       operator's total stock, not just what's liened
+    //                       to us)
+    //   • lienedValue     — sum of (remainingQty × currentPrice) for liens
+    //                       held by THIS financier org against receipts in
+    //                       that warehouse
+    // All three are decimal strings (matches FE contract).
+    const enriched = await Promise.all(
+      links.map(async (l) => {
+        const rollups = await this.computeWarehouseRollups(
+          tenantId,
+          l.warehouse.id,
+          financierOrg.id,
+        );
+        return this.projectFinancierWarehouseLink(l, rollups);
+      }),
+    );
+
     return {
-      items: links.map((l) => this.projectFinancierWarehouseLink(l)),
+      items: enriched,
       total,
       page,
       limit,
       totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * Live position numbers per (warehouse, financier). Broken out so the
+   * detail endpoint can reuse the exact same math the list uses.
+   *
+   * `tenantId` scopes both the receipt query and the price lookup —
+   * a financier is cross-tenant but each warehouse belongs to exactly
+   * one tenant, so this is unambiguous.
+   */
+  private async computeWarehouseRollups(
+    tenantId: string,
+    warehouseId: string,
+    financierOrgId: string,
+  ): Promise<{
+    clientCount: number;
+    totalStockValue: string;
+    lienedValue: string;
+    currency: string;
+  }> {
+    const [distinctClients, stockByCommodity, liens] = await Promise.all([
+      // Distinct clients with in-warehouse stock.
+      this.prisma.receipt.groupBy({
+        by: ['clientId'],
+        where: {
+          warehouseId,
+          tenantId,
+          status: {
+            in: [
+              'ACTIVE',
+              'HELD_WITHDRAWAL',
+              'HELD_LOAN',
+              'HELD_TRADE',
+              'HELD_PLEDGE_PENDING',
+              'HELD_LIEN',
+            ],
+          },
+        },
+      }),
+      // Stock value: group by commodity so we can price each pile.
+      this.prisma.receipt.groupBy({
+        by: ['commodityId'],
+        where: {
+          warehouseId,
+          tenantId,
+          status: {
+            in: [
+              'ACTIVE',
+              'HELD_WITHDRAWAL',
+              'HELD_LOAN',
+              'HELD_TRADE',
+              'HELD_PLEDGE_PENDING',
+              'HELD_LIEN',
+            ],
+          },
+        },
+        _sum: { quantity: true },
+      }),
+      // Liens THIS financier holds against receipts in this warehouse.
+      this.prisma.lien.findMany({
+        where: {
+          financierOrgId,
+          receipt: { warehouseId, tenantId },
+          status: { in: [LienStatus.ACTIVE, LienStatus.PARTIALLY_RELEASED] },
+        },
+        select: {
+          remainingQuantity: true,
+          receipt: { select: { commodityId: true } },
+        },
+      }),
+    ]);
+
+    // Batch price lookup for every commodity we'll price.
+    const commodityIds = new Set<string>();
+    for (const g of stockByCommodity) commodityIds.add(g.commodityId);
+    for (const l of liens) commodityIds.add(l.receipt.commodityId);
+    const priceByCommodity = new Map<string, Prisma.Decimal>();
+    let currency = 'NGN';
+    for (const cid of commodityIds) {
+      const p = await this.commodityPrices.currentPrice(tenantId, cid);
+      if (p) {
+        priceByCommodity.set(cid, p.pricePerUnit);
+        currency = p.currency;
+      }
+    }
+
+    let totalStockValue = new Prisma.Decimal(0);
+    for (const g of stockByCommodity) {
+      const price = priceByCommodity.get(g.commodityId);
+      if (!price) continue;
+      totalStockValue = totalStockValue.add(
+        price.mul(g._sum.quantity ?? 0),
+      );
+    }
+    let lienedValue = new Prisma.Decimal(0);
+    for (const lien of liens) {
+      const price = priceByCommodity.get(lien.receipt.commodityId);
+      if (!price) continue;
+      lienedValue = lienedValue.add(price.mul(lien.remainingQuantity));
+    }
+
+    return {
+      clientCount: distinctClients.length,
+      totalStockValue: totalStockValue.toFixed(2),
+      lienedValue: lienedValue.toFixed(2),
+      currency,
     };
   }
 
@@ -398,6 +529,28 @@ export class WarehouseLinksService {
       },
     });
 
+    // Platform-wide activity emit — the TA's approval is a commercial
+    // milestone (a new financier↔warehouse relationship going live).
+    // tenantId set because this is scoped to the tenant owning the
+    // warehouse.
+    void this.prisma.activityLog
+      .create({
+        data: {
+          tenantId,
+          userId: adminUserId,
+          action: 'warehouse_link.approved',
+          entityType: 'WAREHOUSE_LINK',
+          entityId: link.id,
+          description: `${link.financierOrg.name} was approved to onboard ${link.warehouse.name}`,
+          metadata: {
+            severity: 'INFO',
+            financierOrgId: link.financierOrg.id,
+            warehouseId: link.warehouse.id,
+          } as any,
+        },
+      })
+      .catch(() => undefined);
+
     // Notify all financier-org users so their Warehouses screen refreshes
     // and they can start accepting pledges from that warehouse's clients.
     const financierUserIds = await this.prisma.user
@@ -471,6 +624,27 @@ export class WarehouseLinksService {
       },
     });
 
+    // Platform-wide activity emit. Severity WARNING — a rejection is a
+    // commercial signal worth surfacing on the GA activity feed.
+    void this.prisma.activityLog
+      .create({
+        data: {
+          tenantId,
+          userId: adminUserId,
+          action: 'warehouse_link.rejected',
+          entityType: 'WAREHOUSE_LINK',
+          entityId: link.id,
+          description: `${link.financierOrg.name}'s onboarding request for ${link.warehouse.name} was rejected: ${reason}`,
+          metadata: {
+            severity: 'WARNING',
+            reason,
+            financierOrgId: link.financierOrg.id,
+            warehouseId: link.warehouse.id,
+          } as any,
+        },
+      })
+      .catch(() => undefined);
+
     const financierUserIds = await this.prisma.user
       .findMany({
         where: { financierOrgId: link.financierOrg.id, status: 'ACTIVE' },
@@ -504,14 +678,22 @@ export class WarehouseLinksService {
   // Phase 3 leaves totalStockValue / lienedValue / clientCount as null;
   // Phase 4 populates them from the receipts + liens tables.
 
-  private projectFinancierWarehouseLink(l: {
-    id: string;
-    warehouse: { id: string; name: string; location: string };
-    status: WarehouseLinkStatus;
-    agreementDocUrl: string | null;
-    signedAt: Date | null;
-    decisionReason: string | null;
-  }) {
+  private projectFinancierWarehouseLink(
+    l: {
+      id: string;
+      warehouse: { id: string; name: string; location: string };
+      status: WarehouseLinkStatus;
+      agreementDocUrl: string | null;
+      signedAt: Date | null;
+      decisionReason: string | null;
+    },
+    rollups?: {
+      clientCount: number;
+      totalStockValue: string;
+      lienedValue: string;
+      currency: string;
+    },
+  ) {
     return {
       id: l.id,
       warehouse: {
@@ -525,9 +707,13 @@ export class WarehouseLinksService {
       // TA rejection reasons surface here too, so a financier looking at
       // an OFFBOARDED link they didn't cause can see why.
       decisionReason: l.decisionReason,
-      totalStockValue: null,
-      lienedValue: null,
-      clientCount: null,
+      // Live rollups from computeWarehouseRollups; null when not supplied
+      // (e.g. on the onboard/offboard mutations where they'd be 0/0/0
+      // anyway and the FE is about to refetch the list).
+      totalStockValue: rollups?.totalStockValue ?? null,
+      lienedValue: rollups?.lienedValue ?? null,
+      clientCount: rollups?.clientCount ?? null,
+      currency: rollups?.currency ?? null,
     };
   }
 
