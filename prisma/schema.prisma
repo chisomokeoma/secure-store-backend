@@ -203,9 +203,37 @@ enum BillingFrequency {
 // rename here breaks the FE's status-badge rendering AND the mutation
 // call sites. Do NOT rename without a coordinated FE change.
 
-enum FinancierOrgStatus {
+enum TenantStatus {
   ACTIVE
   SUSPENDED
+}
+
+/// Two categories of tenant, semantically distinct:
+///   • INTERNAL — SecureStore's own collateral operations. Cannot be
+///     suspended (we don't bill ourselves) — the GA UI hides / disables
+///     the Suspend action for these, and the service rejects the call
+///     defensively.
+///   • EXTERNAL — a paying customer collateral manager (e.g. Sahel Ltd).
+///     Subject to commercial gating: GA can suspend the org for
+///     non-payment / non-compliance. Staff (TA + WM) are blocked from
+///     signing in while suspended; clients keep access to their own
+///     inventory (property right, not gated by a commercial dispute).
+enum TenantType {
+  INTERNAL
+  EXTERNAL
+}
+
+enum FinancierOrgStatus {
+  // Live. Financier can be pledged to, receive lookups, invite users, etc.
+  ACTIVE
+  // Reversible pause (GA disables via /disable → SUSPENDED). Blocks new
+  // pledges targeting this financier; existing liens remain visible and
+  // approvable — you can still release someone from a suspended bank.
+  SUSPENDED
+  // Terminal. GA has offboarded the financier from the platform. Blocked
+  // by the offboard endpoint if any active liens exist. No reactivation
+  // path — a returning financier is a new org row.
+  OFFBOARDED
 }
 
 enum WarehouseLinkStatus {
@@ -328,6 +356,24 @@ model Tenant {
   id        String   @id @default(uuid())
   name      String   @unique
   slug      String   @unique
+  // Basic commercial contact block — populated by the GA when onboarding.
+  // All nullable; only `name` and the first-admin block are enforced on the
+  // Add Institution drawer. Slug is derived from name when omitted.
+  logoUrl      String? @map("logo_url")
+  contactEmail String? @map("contact_email")
+  phoneNumber  String? @map("phone_number")
+  address      String?
+  // Reversible platform-level pause. Suspension blocks new sign-ins for
+  // this tenant's STAFF (TA + WM); CLIENT users keep access to their own
+  // inventory. Stored commodities and existing liens are UNTOUCHED —
+  // suspension is a commercial state, not a data state. Only applies to
+  // EXTERNAL tenants (see `type` below).
+  status    TenantStatus @default(ACTIVE)
+  // INTERNAL = SecureStore's own operations (cannot be suspended);
+  // EXTERNAL = paying customer collateral managers (commercial-lever
+  // suspension applies). Default EXTERNAL because that's the case the
+  // GA onboards; INTERNAL is set only for our own seeded tenant.
+  type      TenantType @default(EXTERNAL)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -353,8 +399,10 @@ model Tenant {
   clientAttachments    ClientWarehouseAttachment[]
   clientLookupAudits   ClientLookupAudit[]
 
-  // Collateral flow — new entities in the Financier / Pledge / Lien model
-  financierOrgs        FinancierOrg[]
+  // Collateral flow — new entities in the Financier / Pledge / Lien model.
+  // Note: FinancierOrg is DELIBERATELY not related to Tenant. Financiers
+  // are platform-level (see comment on the model); a financier connects
+  // to a tenant transitively via WarehouseLink → Warehouse.tenantId.
   warehouseLinks       WarehouseLink[]
   pledges              Pledge[]
   liens                Lien[]
@@ -537,6 +585,11 @@ model Commodity {
   numberOfGrades      Int          @default(3) @map("number_of_grades")
   code                String?      @unique
   standardBagWeightKg Float?       @map("standard_bag_weight_kg")
+  // Density in kilograms per litre — used to convert LITRE-denominated
+  // stock into KG for warehouse-utilisation math. Nullable: a LITRE
+  // commodity without a density set is skipped from utilisation totals
+  // rather than approximated (better to under-report than to lie).
+  standardDensityKgPerLitre Float? @map("standard_density_kg_per_litre")
 
   receipts             Receipt[]
   warehouseCommodities WarehouseCommodity[]
@@ -1135,8 +1188,12 @@ model PasswordResetToken {
 
 model ActivityLog {
   id       String  @id @default(uuid())
-  tenantId String  @map("tenant_id")
-  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  // Nullable so platform-level events (financier.created,
+  // lien.force_released, tenant.created, warehouse_link.approved when
+  // it references a cross-tenant entity) can be logged. Tenant-scoped
+  // events still set this to enable per-tenant audit views.
+  tenantId String?  @map("tenant_id")
+  tenant   Tenant?  @relation(fields: [tenantId], references: [id])
   userId   String? @map("user_id")
   user     User?   @relation(fields: [userId], references: [id])
 
@@ -1314,20 +1371,45 @@ model ClientLookupAudit {
 /// The bank / financial institution that receives pledges and holds liens.
 /// One FinancierOrg has many financier-role users (see User.financierOrgId).
 /// Provisioned by Tenant Admin via a new "Add financier org" screen.
+/// FinancierOrg is a PLATFORM-LEVEL entity, peer to Tenant. It has no
+/// tenantId — a financier can (and typically does) partner with warehouses
+/// across many tenants. The many-to-many between FinancierOrg and Warehouse
+/// is mediated by WarehouseLink, which carries the tenant context via its
+/// warehouse FK.
+///
+/// Created and administered exclusively by users with the GLOBAL_ADMIN
+/// role (this ties directly to SecureStore's licensing revenue — the GA
+/// is the counterparty to a Financier's onboarding agreement).
 model FinancierOrg {
   id            String @id @default(uuid())
-  tenantId      String @map("tenant_id")
-  tenant        Tenant @relation(fields: [tenantId], references: [id])
 
-  name          String
+  // Core identity — the minimum a regulated financial institution needs
+  // to be recognisable in the platform. Only `name` is required; everything
+  // else is optional so we don't front-load a heavy KYC form on the GA.
+  // Financiers are heavily regulated externally; our own KYC is light.
+  name          String @unique
   licenseNumber String? @map("license_number")
   // Signed license certificate / master agreement uploaded at create time
-  // (via POST /storage/upload?kind=LICENSE_DOC). Optional — a TA can add
-  // it later via the same modal in edit mode. Storing here so the TA's
-  // Financiers table can render a "view license" affordance without an
-  // extra join.
+  // (via POST /storage/upload?kind=LICENSE_DOC). Optional — the GA can
+  // add or replace it later via the same edit modal.
   licenseDocUrl String? @map("license_doc_url")
   logoUrl       String? @map("logo_url")
+
+  // ── Basic-KYC block (all optional; PO: "similar to Tenant but with
+  //    less mandatory fields"). Field names match the FE
+  //    CreateFinancierOrgPayload contract verbatim so the DTO layer needs
+  //    no camel/snake remapping. `tin` / `regulator` / `website` below are
+  //    kept in the schema for future admin surfaces even though the current
+  //    FE form doesn't send them; they're harmless nulls until then.
+  contactEmail String? @map("contact_email")
+  phoneNumber  String? @map("phone_number")
+  address      String? @map("address")
+  // Tax Identification Number (Nigerian TIN / other jurisdiction analog).
+  tin             String?
+  // The primary regulator (e.g. "CBN", "SEC", "NAICOM"). Free-form for
+  // now — an enum would prematurely constrain international expansion.
+  regulator       String?
+  website         String?
 
   status        FinancierOrgStatus @default(ACTIVE)
 
@@ -1346,8 +1428,6 @@ model FinancierOrg {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  @@unique([tenantId, name])
-  @@index([tenantId])
   @@index([status])
   @@map("financier_orgs")
 }
